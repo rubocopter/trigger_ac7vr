@@ -15,7 +15,7 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 16> kProbeRvas{{
+constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 18> kProbeRvas{{
     {L"ToggleVRTestMissionMenu_command", 0x00916380},
     {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
     {L"IsVRGameMode_exec", 0x00924560},
@@ -25,7 +25,9 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 16> kProbeRvas{{
     {L"bStartInVR_SetBit", 0x01456B70},
     {L"bStartFromVRHangar_SetBit", 0x01456B80},
     {L"bStartInAR_SetBit", 0x01456BC0},
+    {L"GeneralProjectSettings_candidate", 0x01456BD0},
     {L"EnableHMD_exec", 0x01192B80},
+    {L"EnableHMD_native", 0x0118F1E0},
     {L"GetHMDDeviceName_exec", 0x01192DB0},
     {L"GetHMDDeviceName_native", 0x0118F690},
     {L"IsHMDConnected_exec", 0x011937B0},
