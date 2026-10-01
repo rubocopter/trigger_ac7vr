@@ -81,7 +81,7 @@ def main() -> int:
             pointer_rva = file_offset_to_rva(pointer_offset)
             if pointer_rva is not None:
                 print(f"  pointer file={pointer_offset:#x} rva={pointer_rva:#x}")
-                for delta in range(-0x20, 0x38, 8):
+                for delta in range(-0x80, 0x88, 8):
                     qword_offset = pointer_offset + delta
                     if qword_offset < 0 or qword_offset + 8 > len(data):
                         continue

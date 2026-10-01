@@ -7,6 +7,12 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 LOG = Path(__file__).with_name("probe.log")
 WANTED = {
     "ToggleVRTestMissionMenu_exec",
+    "bIsVRMode_SetBit",
+    "bStartInVR_SetBit",
+    "bStartFromVRHangar_SetBit",
+    "bStartInAR_SetBit",
+    "EnableHMD_exec",
+    "GetHMDDeviceName_native",
     "IsHMDConnected_native",
     "IsHMDEnabled_native",
 }

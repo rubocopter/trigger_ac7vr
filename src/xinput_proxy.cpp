@@ -15,14 +15,19 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 11> kProbeRvas{{
+constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 16> kProbeRvas{{
     {L"ToggleVRTestMissionMenu_command", 0x00916380},
     {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
     {L"IsVRGameMode_exec", 0x00924560},
     {L"IsVRMode_exec", 0x00924590},
     {L"IsVRUIMode_exec", 0x009245C0},
+    {L"bIsVRMode_SetBit", 0x0213D160},
+    {L"bStartInVR_SetBit", 0x01456B70},
+    {L"bStartFromVRHangar_SetBit", 0x01456B80},
+    {L"bStartInAR_SetBit", 0x01456BC0},
     {L"EnableHMD_exec", 0x01192B80},
     {L"GetHMDDeviceName_exec", 0x01192DB0},
+    {L"GetHMDDeviceName_native", 0x0118F690},
     {L"IsHMDConnected_exec", 0x011937B0},
     {L"IsHMDEnabled_exec", 0x011937E0},
     {L"IsHMDConnected_native", 0x01190460},
@@ -39,7 +44,7 @@ FILE* OpenLog() {
 }
 
 void LogBytes(FILE* file, const wchar_t* label, const std::uint8_t* address, std::size_t count) {
-    std::array<std::uint8_t, 64> bytes{};
+    std::array<std::uint8_t, 160> bytes{};
     const auto to_read = (count < bytes.size()) ? count : bytes.size();
     SIZE_T read = 0;
     const BOOL ok = ReadProcessMemory(GetCurrentProcess(), address, bytes.data(), to_read, &read);
@@ -119,7 +124,7 @@ DWORD WINAPI ProbeThread(void*) {
                  nt->OptionalHeader.AddressOfEntryPoint);
 
         for (const auto& [label, rva] : kProbeRvas) {
-            LogBytes(file, label, module + rva, 64);
+            LogBytes(file, label, module + rva, 160);
         }
         LogHmdState(file, module);
     }
