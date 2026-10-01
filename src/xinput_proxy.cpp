@@ -549,6 +549,63 @@ void DumpRuntimeRegion(FILE* file, const std::uint8_t* module) {
              static_cast<unsigned long long>(read), written);
 }
 
+void DumpRuntimeImageSections(FILE* log, const std::uint8_t* module) {
+    // Keep executable code, vtables, and unwind tables for offline analysis.
+    // Capturing on the probe thread avoids file I/O in virtual method calls.
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(module + dos->e_lfanew);
+    const auto* sections = IMAGE_FIRST_SECTION(nt);
+    FILE* manifest = nullptr;
+    if (_wfopen_s(&manifest, L"E:\\trigger_ac7vr\\evidence\\runtime_image.tsv", L"wb") != 0 || !manifest) {
+        fwprintf(log, L"runtime_image_dump manifest=<open failed>\n");
+        return;
+    }
+    fprintf(manifest, "module_base\t0x%llX\n",
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(module)));
+    fprintf(manifest, "timestamp\t0x%08X\n", nt->FileHeader.TimeDateStamp);
+
+    std::array<std::uint8_t, 64 * 1024> bytes{};
+    for (WORD index = 0; index < nt->FileHeader.NumberOfSections; ++index) {
+        const auto& section = sections[index];
+        char name[IMAGE_SIZEOF_SHORT_NAME + 1]{};
+        memcpy(name, section.Name, IMAGE_SIZEOF_SHORT_NAME);
+        if (strcmp(name, ".text") != 0 && strcmp(name, ".rdata") != 0 && strcmp(name, ".pdata") != 0) {
+            continue;
+        }
+        if ((section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0) {
+            continue;
+        }
+
+        wchar_t path[MAX_PATH]{};
+        _snwprintf_s(path, _countof(path), _TRUNCATE,
+                     L"E:\\trigger_ac7vr\\evidence\\Ace7Game%hs.runtime.bin", name);
+        FILE* dump = nullptr;
+        const auto size = static_cast<std::size_t>(section.Misc.VirtualSize);
+        std::size_t total = 0;
+        bool complete = _wfopen_s(&dump, path, L"wb") == 0 && dump;
+        while (complete && total < size) {
+            const auto remaining = size - total;
+            const auto count = remaining < bytes.size() ? remaining : bytes.size();
+            SIZE_T read = 0;
+            const BOOL ok = ReadProcessMemory(GetCurrentProcess(), module + section.VirtualAddress + total,
+                                               bytes.data(), count, &read);
+            if (!ok || read != count || fwrite(bytes.data(), 1, count, dump) != count) {
+                complete = false;
+                break;
+            }
+            total += count;
+        }
+        if (dump && fclose(dump) != 0) {
+            complete = false;
+        }
+        fprintf(manifest, "section\t%s\t0x%08X\t0x%zX\t%zu\t%u\tAce7Game%s.runtime.bin\n",
+                name, section.VirtualAddress, size, total, static_cast<unsigned>(complete), name);
+        fwprintf(log, L"runtime_image_dump section=%hs rva=0x%08X size=%zu written=%zu complete=%u\n",
+                 name, section.VirtualAddress, size, total, static_cast<unsigned>(complete));
+    }
+    fclose(manifest);
+}
+
 void LogHmdState(FILE* file, const std::uint8_t* module) {
     std::uintptr_t engine = 0;
     SIZE_T read = 0;
@@ -820,6 +877,7 @@ DWORD WINAPI ProbeThread(void*) {
                     LogBytes(file, label, module + rva, 160);
                 }
                 DumpRuntimeRegion(file, module);
+                DumpRuntimeImageSections(file, module);
                 LogGeneralProjectSettings(file, module);
                 LogHmdState(file, module);
                 fwprintf(file, L"persistent_fake_hmd snapshot installed=%u hmd_enabled=%u stereo_enabled=%u\n",

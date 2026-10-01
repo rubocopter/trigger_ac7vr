@@ -48,7 +48,7 @@ The community UEVR compatibility plugin is also useful evidence: it resolves AC7
 
 `src/xinput_proxy.cpp` builds a diagnostic `xinput1_3.dll` proxy. AC7 imports only XInput ordinals 2 and 3 (`XInputGetState` and `XInputSetState`), both of which are forwarded to the system DLL.
 
-The current feasibility probe installs synthetic XR/HMD and stereo interfaces as soon as `GEngine` becomes available, but only when the corresponding PC-build slots are still null. The five ABI calls already validated from runtime disassembly keep explicit implementations; the remaining vtable slots use numbered neutral stubs so the next missing interface surface can be identified from one run.
+The current feasibility probe installs synthetic XR/HMD and stereo interfaces as soon as `GEngine` becomes available, but only when the corresponding PC-build slots are still null. Known ABI calls have explicit implementations; the remaining vtable slots use numbered neutral stubs so the next missing interface surface can be identified from one run. Both interfaces start disabled, and the probe currently observes enable requests without forcing them.
 
 The probe records the main module identity, code bytes at known VR/HMD targets, the HMD/stereo interface pointers, startup settings, and per-slot call counts to:
 
@@ -57,6 +57,17 @@ The probe records the main module identity, code bytes at known VR/HMD targets, 
 First hits to unknown slots and access-violation context are flushed immediately to:
 
 `E:\trigger_ac7vr\evidence\persistent_slots.log`
+
+At the ten-second diagnostic snapshot, the probe also captures the loaded `.text`, `.rdata`, and `.pdata` sections on its monitoring thread. The manifest `evidence\runtime_image.tsv` records the module base, RVAs, sizes, and completion status. This provides runtime code, vtables, and function boundaries for offline inspection rather than requiring another manual launch for each small code window. These ignored captures are diagnostic artifacts, not an executable to launch.
+
+Inspect a runtime code RVA or a table of pointers after the capture:
+
+```powershell
+python inspect_runtime_image.py 0x1ACCFD9
+python inspect_runtime_image.py 0x3ACC7B8 --table 16
+```
+
+The inspector requires the same `capstone` Python package used by the existing disassembly scripts and rejects incomplete captures.
 
 Build:
 
@@ -77,8 +88,12 @@ The configuration and minimal-ABI gates are closed: `bStartInVR` reaches the rea
 
 The first persistent-interface test crashed at RVA `0x009B9939` while releasing an uninitialized shared-pointer controller. The immediate diagnostic captured the same result-buffer address for XR slot 22 and the shared-pointer destructor. UE4 4.18 identifies slot 22 as `GetXRCamera`, which returns a 16-byte `TSharedPtr` through a hidden result buffer. Returning scalar zero did not construct that result.
 
-That failure is fixed. In the 2026-10-01 22:48 manual run the retained path stayed active until the game was closed, with no new probe exception and no matching `Ace7Game.exe` Windows Application Error/WER entry in the run window. The synthetic interfaces received sustained traffic: XR slots 22/23/26/29/30 reached thousands to more than 120,000 calls, stereo slots 0/1 exceeded 90,000 calls, and the underlying HMD device was exercised continuously. The final `ownership_lost` event had both engine slots cleared to null and occurred at shutdown, so it currently matches normal engine teardown rather than the earlier crash.
+That shared-pointer failure did not recur in the 2026-10-01 22:48 manual run, with no new probe exception and no matching `Ace7Game.exe` Windows Application Error/WER entry in the run window. The synthetic interfaces received sustained traffic: XR slots 22/23/26/29/30 reached thousands to more than 120,000 calls, stereo slots 0/1 exceeded 90,000 calls, and the underlying HMD device was exercised continuously. The final `ownership_lost` event had both engine slots cleared to null and occurred at shutdown, so it currently matches normal engine teardown rather than the earlier crash. This establishes stability of the queried interfaces, not activation of stereo rendering.
 
 The UE4 4.18 interface definitions also expose a second return-by-value hazard: XR slot 24, `GetStereoRenderingDevice`, returns another 16-byte `TSharedPtr`. An ABI regression test now covers both shared-pointer results, plus the floating-point return ABI for HMD slot 25 (`GetLensCenterOffset`). The probe provides explicit neutral implementations for the known lifecycle and rendering calls observed so far: XR slots 24/25/27-30, HMD slots 9/12/13/25/33/35/36, and stereo slot 13 (`GetStereoLayers`). Run `ctest --test-dir build -C Release --output-on-failure` after building `fake_interface_abi_test`.
 
-Device slot 52 remains unidentified and is the next concrete reverse-engineering target. The stock UE4.18 `IHeadMountedDisplay` vtable ends at slot 48, so slot 52 is outside the standard interface surface and may belong to an AC7-specific extension. Unknown-slot logging now records the caller address/RVA and the first four stack arguments in addition to the register arguments, so the next manual aircraft-viewer run should expose the exact AC7 callsite for slot 52 without guessing its signature. Returning neutral values still does not implement head tracking or headset rendering; OpenXR integration remains gated on completing this retained interface surface and confirming where stereo view setup begins.
+In the 2026-10-01 23:21:27 manual run, the snapshot explicitly reported `hmd_enabled=0 stereo_enabled=0`, with no calls to the mapped enable methods (HMD device slot 11 / stereo slot 2). The engine's repeated queries therefore do not establish VR activation. The next activation experiment must first provide safe view/projection methods and then verify actual stereo enablement, rather than treating query counts as proof of VR rendering.
+
+Device slot 52 remains unidentified. The stock UE4.18 `IHeadMountedDisplay` vtable ends at slot 48, so slot 52 is outside the standard interface surface. The runtime capture consistently returns to RVA `0x01ACCFD9`, but the preceding instruction calls a different object's vtable offset `+0x378`, not the synthetic device's `+0x1A0`. This return address is not sufficient to identify the immediate slot-52 dispatch: an intermediate tail call is one possible explanation. The full runtime section capture is intended to recover the intervening route before assigning a signature. The other unknown method, XR slot 9, matches `GetCurrentPose` in the UE4.18 headers and has a direct `+0x48` call at RVA `0x0165F56B` with device 0 and quaternion/vector output buffers.
+
+Returning neutral values still does not implement head tracking or headset rendering. OpenXR integration remains gated on identifying the necessary interface surface and confirming where stereo view setup begins.
