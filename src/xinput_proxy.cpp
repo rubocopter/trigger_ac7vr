@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <xinput.h>
+#include <intrin.h>
 
 #include <array>
 #include <atomic>
@@ -110,16 +111,30 @@ bool RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
 }
 
 template <FakeInterfaceKind Kind, std::size_t Slot>
+__declspec(noinline)
 std::uintptr_t FakeUnknownSlot(FakeInterface* self, std::uintptr_t arg1,
                                std::uintptr_t arg2, std::uintptr_t arg3) {
     const bool first = RecordSlot(Kind, Slot, true);
     if (first) {
-        char line[256]{};
+        const auto caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const auto caller_rva = module && caller >= module ? caller - module : 0;
+        const auto* return_address_slot =
+            reinterpret_cast<const std::uintptr_t*>(_AddressOfReturnAddress());
+        const std::uintptr_t stack_arg4 = return_address_slot[5];
+        const std::uintptr_t stack_arg5 = return_address_slot[6];
+        const std::uintptr_t stack_arg6 = return_address_slot[7];
+        const std::uintptr_t stack_arg7 = return_address_slot[8];
+        char line[512]{};
         const int length = _snprintf_s(
             line, sizeof(line), _TRUNCATE,
-            "unknown_args interface=%s slot=%zu this=%p arg1=%p arg2=%p arg3=%p\r\n",
+            "unknown_args interface=%s slot=%zu this=%p arg1=%p arg2=%p arg3=%p "
+            "caller=%p caller_rva=0x%llX stack4=%p stack5=%p stack6=%p stack7=%p\r\n",
             InterfaceName(Kind), Slot, self, reinterpret_cast<void*>(arg1),
-            reinterpret_cast<void*>(arg2), reinterpret_cast<void*>(arg3));
+            reinterpret_cast<void*>(arg2), reinterpret_cast<void*>(arg3),
+            reinterpret_cast<void*>(caller), static_cast<unsigned long long>(caller_rva),
+            reinterpret_cast<void*>(stack_arg4), reinterpret_cast<void*>(stack_arg5),
+            reinterpret_cast<void*>(stack_arg6), reinterpret_cast<void*>(stack_arg7));
         if (length > 0) {
             AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
         }
@@ -204,9 +219,41 @@ FakeSharedPointerResult* FakeXrGetCamera(FakeInterface*, FakeSharedPointerResult
     return out;
 }
 
+FakeSharedPointerResult* FakeXrGetStereoRenderingDevice(FakeInterface*,
+                                                        FakeSharedPointerResult* out) {
+    RecordSlot(FakeInterfaceKind::Hmd, 24, false);
+    if (out) {
+        *out = {nullptr, nullptr};
+    }
+    return out;
+}
+
+void* FakeXrGetInput(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 25, false);
+    return nullptr;
+}
+
 bool FakeXrIsHeadTrackingAllowed(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Hmd, 0xD0 / sizeof(void*), false);
     return g_fake_hmd_enabled;
+}
+
+void FakeXrOnBeginPlay(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 27, false);
+}
+
+void FakeXrOnEndPlay(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 28, false);
+}
+
+bool FakeXrOnStartGameFrame(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 29, false);
+    return false;
+}
+
+bool FakeXrOnEndGameFrame(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 30, false);
+    return false;
 }
 
 bool FakeDeviceIsConnected(FakeInterface*) {
@@ -214,9 +261,42 @@ bool FakeDeviceIsConnected(FakeInterface*) {
     return true;
 }
 
+bool FakeDeviceIsEnabled(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Device, 9, false);
+    return g_fake_hmd_enabled;
+}
+
 void FakeDeviceEnable(FakeInterface*, bool enabled) {
     RecordSlot(FakeInterfaceKind::Device, 0x58 / sizeof(void*), false);
     g_fake_hmd_enabled = enabled;
+}
+
+std::uint32_t FakeDeviceGetType(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Device, 12, false);
+    return 0;
+}
+
+bool FakeDeviceGetMonitorInfo(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Device, 13, false);
+    return false;
+}
+
+float FakeDeviceGetLensCenterOffset(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Device, 25, false);
+    return 0.0f;
+}
+
+void FakeDeviceDrawDistortionMesh(FakeInterface*, void*, const void*) {
+    RecordSlot(FakeInterfaceKind::Device, 33, false);
+}
+
+void FakeDeviceUpdatePostProcessSettings(FakeInterface*, void*) {
+    RecordSlot(FakeInterfaceKind::Device, 35, false);
+}
+
+void* FakeDeviceGetDistortionTextureLeft(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Device, 36, false);
+    return nullptr;
 }
 
 bool FakeStereoIsEnabled(FakeInterface*) {
@@ -236,6 +316,11 @@ bool FakeStereoEnable(FakeInterface*, bool enabled) {
     return true;
 }
 
+void* FakeStereoGetLayers(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 13, false);
+    return nullptr;
+}
+
 void InitializeFakeInterfaces() {
     g_fake_hmd_vtable = MakeStubVtable<FakeInterfaceKind::Hmd>(std::make_index_sequence<kFakeVtableSlots>{});
     g_fake_device_vtable = MakeStubVtable<FakeInterfaceKind::Device>(std::make_index_sequence<kFakeVtableSlots>{});
@@ -244,12 +329,26 @@ void InitializeFakeInterfaces() {
     g_fake_hmd_vtable[0] = reinterpret_cast<void*>(&FakeHmdGetDeviceName);
     g_fake_hmd_vtable[22] = reinterpret_cast<void*>(&FakeXrGetCamera);
     g_fake_hmd_vtable[0xB8 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdGetDevice);
+    g_fake_hmd_vtable[24] = reinterpret_cast<void*>(&FakeXrGetStereoRenderingDevice);
+    g_fake_hmd_vtable[25] = reinterpret_cast<void*>(&FakeXrGetInput);
     g_fake_hmd_vtable[0xD0 / sizeof(void*)] = reinterpret_cast<void*>(&FakeXrIsHeadTrackingAllowed);
+    g_fake_hmd_vtable[27] = reinterpret_cast<void*>(&FakeXrOnBeginPlay);
+    g_fake_hmd_vtable[28] = reinterpret_cast<void*>(&FakeXrOnEndPlay);
+    g_fake_hmd_vtable[29] = reinterpret_cast<void*>(&FakeXrOnStartGameFrame);
+    g_fake_hmd_vtable[30] = reinterpret_cast<void*>(&FakeXrOnEndGameFrame);
     g_fake_device_vtable[0x40 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceIsConnected);
+    g_fake_device_vtable[9] = reinterpret_cast<void*>(&FakeDeviceIsEnabled);
     g_fake_device_vtable[0x58 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceEnable);
+    g_fake_device_vtable[12] = reinterpret_cast<void*>(&FakeDeviceGetType);
+    g_fake_device_vtable[13] = reinterpret_cast<void*>(&FakeDeviceGetMonitorInfo);
+    g_fake_device_vtable[25] = reinterpret_cast<void*>(&FakeDeviceGetLensCenterOffset);
+    g_fake_device_vtable[33] = reinterpret_cast<void*>(&FakeDeviceDrawDistortionMesh);
+    g_fake_device_vtable[35] = reinterpret_cast<void*>(&FakeDeviceUpdatePostProcessSettings);
+    g_fake_device_vtable[36] = reinterpret_cast<void*>(&FakeDeviceGetDistortionTextureLeft);
     g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
     g_fake_stereo_vtable[1] = reinterpret_cast<void*>(&FakeStereoIsEnabledOnNextFrame);
     g_fake_stereo_vtable[0x10 / sizeof(void*)] = reinterpret_cast<void*>(&FakeStereoEnable);
+    g_fake_stereo_vtable[13] = reinterpret_cast<void*>(&FakeStereoGetLayers);
     g_fake_hmd_enabled = false;
     g_fake_stereo_enabled = false;
 
