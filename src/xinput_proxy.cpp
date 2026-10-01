@@ -85,6 +85,49 @@ void AppendImmediateDiagnostic(const char* text, DWORD length) {
     CloseHandle(file);
 }
 
+void AppendCallerCodeBytes(std::uintptr_t caller, std::uintptr_t module) {
+    constexpr std::size_t kBytesBeforeCaller = 64;
+    constexpr std::size_t kBytesAfterCaller = 32;
+    constexpr std::size_t kCaptureSize = kBytesBeforeCaller + kBytesAfterCaller;
+    if (caller < kBytesBeforeCaller) {
+        return;
+    }
+
+    const auto start = caller - kBytesBeforeCaller;
+    std::array<unsigned char, kCaptureSize> bytes{};
+    SIZE_T read = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(start),
+                           bytes.data(), bytes.size(), &read) || read == 0) {
+        return;
+    }
+
+    char line[768]{};
+    const auto start_rva = module && start >= module ? start - module : 0;
+    int cursor = _snprintf_s(
+        line, sizeof(line), _TRUNCATE,
+        "caller_code start=%p start_rva=0x%llX caller_offset=0x%zX read=%zu data=",
+        reinterpret_cast<void*>(start), static_cast<unsigned long long>(start_rva),
+        kBytesBeforeCaller, static_cast<std::size_t>(read));
+    if (cursor <= 0) {
+        return;
+    }
+
+    for (SIZE_T i = 0; i < read && cursor + 3 < static_cast<int>(sizeof(line)); ++i) {
+        const int written = _snprintf_s(line + cursor, sizeof(line) - cursor, _TRUNCATE,
+                                        "%02X", bytes[i]);
+        if (written <= 0) {
+            break;
+        }
+        cursor += written;
+    }
+    if (cursor + 2 < static_cast<int>(sizeof(line))) {
+        line[cursor++] = '\r';
+        line[cursor++] = '\n';
+        line[cursor] = '\0';
+    }
+    AppendImmediateDiagnostic(line, static_cast<DWORD>(cursor));
+}
+
 bool RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
     if (slot >= kFakeVtableSlots) {
         return false;
@@ -138,6 +181,7 @@ std::uintptr_t FakeUnknownSlot(FakeInterface* self, std::uintptr_t arg1,
         if (length > 0) {
             AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
         }
+        AppendCallerCodeBytes(caller, module);
     }
     return 0;
 }
