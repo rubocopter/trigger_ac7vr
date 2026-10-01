@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -200,8 +201,9 @@ std::array<void*, kFakeVtableSlots> g_fake_stereo_vtable =
 FakeInterface g_fake_hmd{g_fake_hmd_vtable.data()};
 FakeInterface g_fake_device{g_fake_device_vtable.data()};
 FakeInterface g_fake_stereo{g_fake_stereo_vtable.data()};
-bool g_fake_hmd_enabled = false;
-bool g_fake_stereo_enabled = false;
+std::atomic<bool> g_fake_hmd_enabled{false};
+std::atomic<bool> g_fake_stereo_enabled{false};
+std::atomic<float> g_fake_eye_aspect{1.0f};
 PVOID g_vectored_exception_handler = nullptr;
 
 constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
@@ -343,6 +345,12 @@ void* FakeDeviceGetDistortionTextureLeft(FakeInterface*) {
     return nullptr;
 }
 
+void FakeDeviceStartupHook(FakeInterface*) {
+    // AC7 engine RVA 0x01AD3BC0 tail-dispatches to device +0x1A0 with
+    // only this configured. The engine caller ignores the return value.
+    RecordSlot(FakeInterfaceKind::Device, 52, false);
+}
+
 bool FakeStereoIsEnabled(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Stereo, 0, false);
     return g_fake_stereo_enabled;
@@ -357,7 +365,114 @@ bool FakeStereoEnable(FakeInterface*, bool enabled) {
     RecordSlot(FakeInterfaceKind::Stereo, 0x10 / sizeof(void*), false);
     g_fake_stereo_enabled = enabled;
     g_fake_hmd_enabled = enabled;
-    return true;
+    return enabled;
+}
+
+struct FakeVector2 { float x, y; };
+struct FakeVector3 { float x, y, z; };
+struct FakeRotator { float pitch, yaw, roll; };
+struct FakeMatrix { float m[4][4]; };
+static_assert(sizeof(FakeMatrix) == 64);
+
+void FakeStereoAdjustViewRect(FakeInterface*, std::int32_t pass, std::int32_t& x,
+                              std::int32_t& y, std::uint32_t& width, std::uint32_t& height) {
+    const bool first = RecordSlot(FakeInterfaceKind::Stereo, 3, false);
+    if ((pass == 1 || pass == 2) && width >= 2) {
+        const auto left_width = width / 2;
+        if (pass == 1) {
+            width = left_width;
+        } else {
+            x += static_cast<std::int32_t>(left_width);
+            width -= left_width;
+        }
+        if (height) {
+            g_fake_eye_aspect.store(static_cast<float>(width) / height, std::memory_order_relaxed);
+        }
+    }
+    if (first) {
+        char line[192]{};
+        const int length = _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "stereo_view_rect pass=%d x=%d y=%d width=%u height=%u\r\n", pass, x, y, width, height);
+        if (length > 0) AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+    }
+}
+
+FakeVector2* FakeStereoGetTextSafeRegion(FakeInterface*, FakeVector2* out) {
+    RecordSlot(FakeInterfaceKind::Stereo, 4, false);
+    if (out) *out = {0.75f, 0.75f};
+    return out;
+}
+
+void FakeStereoCalculateViewOffset(FakeInterface*, std::int32_t pass, FakeRotator& rotation,
+                                    float world_to_meters, FakeVector3& location) {
+    RecordSlot(FakeInterfaceKind::Stereo, 5, false);
+    if (pass != 1 && pass != 2) return;
+    constexpr float degrees_to_radians = 0.017453292519943295f;
+    const float pitch = rotation.pitch * degrees_to_radians;
+    const float yaw = rotation.yaw * degrees_to_radians;
+    const float roll = rotation.roll * degrees_to_radians;
+    const float sr = sinf(roll), cr = cosf(roll), sp = sinf(pitch), cp = cosf(pitch);
+    const float sy = sinf(yaw), cy = cosf(yaw);
+    const float offset = (pass == 1 ? -0.032f : 0.032f) * world_to_meters;
+    // UE's camera right axis is rotated +Y. Keep parallel cameras and a
+    // fixed 64 mm IPD for this monitor-only stereo feasibility probe.
+    location.x += offset * (sr * sp * cy - cr * sy);
+    location.y += offset * (sr * sp * sy + cr * cy);
+    location.z += offset * (-sr * cp);
+}
+
+FakeMatrix* FakeStereoGetProjection(FakeInterface*, FakeMatrix* out, std::int32_t pass) {
+    const bool first = RecordSlot(FakeInterfaceKind::Stereo, 6, false);
+    if (out) {
+        *out = {};
+        // UE4 row-vector convention, 90-degree horizontal FOV, infinite
+        // reversed-Z perspective, and a 10 world-unit near plane.
+        out->m[0][0] = 1.0f;
+        out->m[1][1] = g_fake_eye_aspect.load(std::memory_order_relaxed);
+        out->m[2][3] = 1.0f;
+        out->m[3][2] = 10.0f;
+    }
+    if (first) {
+        char line[192]{};
+        const int length = _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "stereo_projection pass=%d aspect=%.6f output=%p\r\n", pass,
+            g_fake_eye_aspect.load(std::memory_order_relaxed), out);
+        if (length > 0) AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+    }
+    return out;
+}
+
+void FakeStereoInitCanvas(FakeInterface*, void*, void*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 7, false);
+}
+
+bool FakeStereoIsSpectatorScreenActive(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 8, false);
+    return false;
+}
+
+void FakeStereoRenderTexture(FakeInterface*, void*, void*, void*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 9, false);
+}
+
+void FakeStereoGetOrthoProjection(FakeInterface*, std::int32_t width, std::int32_t,
+                                   float, FakeMatrix* matrices) {
+    RecordSlot(FakeInterfaceKind::Stereo, 10, false);
+    if (!matrices) return;
+    matrices[0] = {};
+    for (std::size_t i = 0; i < 4; ++i) matrices[0].m[i][i] = 1.0f;
+    matrices[1] = matrices[0];
+    matrices[1].m[3][0] = static_cast<float>(width) * 0.5f;
+}
+
+void* FakeStereoGetCustomPresent(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 11, false);
+    return nullptr;
+}
+
+void* FakeStereoGetRenderTargetManager(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 12, false);
+    return nullptr;
 }
 
 void* FakeStereoGetLayers(FakeInterface*) {
@@ -389,12 +504,24 @@ void InitializeFakeInterfaces() {
     g_fake_device_vtable[33] = reinterpret_cast<void*>(&FakeDeviceDrawDistortionMesh);
     g_fake_device_vtable[35] = reinterpret_cast<void*>(&FakeDeviceUpdatePostProcessSettings);
     g_fake_device_vtable[36] = reinterpret_cast<void*>(&FakeDeviceGetDistortionTextureLeft);
+    g_fake_device_vtable[52] = reinterpret_cast<void*>(&FakeDeviceStartupHook);
     g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
     g_fake_stereo_vtable[1] = reinterpret_cast<void*>(&FakeStereoIsEnabledOnNextFrame);
     g_fake_stereo_vtable[0x10 / sizeof(void*)] = reinterpret_cast<void*>(&FakeStereoEnable);
+    g_fake_stereo_vtable[3] = reinterpret_cast<void*>(&FakeStereoAdjustViewRect);
+    g_fake_stereo_vtable[4] = reinterpret_cast<void*>(&FakeStereoGetTextSafeRegion);
+    g_fake_stereo_vtable[5] = reinterpret_cast<void*>(&FakeStereoCalculateViewOffset);
+    g_fake_stereo_vtable[6] = reinterpret_cast<void*>(&FakeStereoGetProjection);
+    g_fake_stereo_vtable[7] = reinterpret_cast<void*>(&FakeStereoInitCanvas);
+    g_fake_stereo_vtable[8] = reinterpret_cast<void*>(&FakeStereoIsSpectatorScreenActive);
+    g_fake_stereo_vtable[9] = reinterpret_cast<void*>(&FakeStereoRenderTexture);
+    g_fake_stereo_vtable[10] = reinterpret_cast<void*>(&FakeStereoGetOrthoProjection);
+    g_fake_stereo_vtable[11] = reinterpret_cast<void*>(&FakeStereoGetCustomPresent);
+    g_fake_stereo_vtable[12] = reinterpret_cast<void*>(&FakeStereoGetRenderTargetManager);
     g_fake_stereo_vtable[13] = reinterpret_cast<void*>(&FakeStereoGetLayers);
     g_fake_hmd_enabled = false;
     g_fake_stereo_enabled = false;
+    g_fake_eye_aspect = 1.0f;
 
     for (auto& hit : g_hmd_slot_hits) hit.store(0, std::memory_order_relaxed);
     for (auto& hit : g_device_slot_hits) hit.store(0, std::memory_order_relaxed);
@@ -851,6 +978,7 @@ DWORD WINAPI ProbeThread(void*) {
         const ULONGLONG start = GetTickCount64();
         bool detailed_dump_done = false;
         bool ownership_lost = false;
+        bool stereo_probe_checked = false;
 
         for (;;) {
             if (!state.installed && !ownership_lost) {
@@ -885,6 +1013,27 @@ DWORD WINAPI ProbeThread(void*) {
                          static_cast<unsigned>(g_fake_hmd_enabled),
                          static_cast<unsigned>(g_fake_stereo_enabled));
                 detailed_dump_done = true;
+                changed = true;
+            }
+
+            if (!stereo_probe_checked && detailed_dump_done && state.installed &&
+                !ownership_lost && GetTickCount64() - start >= 15000) {
+                // Opt-in diagnostic: capture the disabled baseline first,
+                // then use the verified UE native to request monitor stereo.
+                stereo_probe_checked = true;
+                const bool requested = GetFileAttributesW(
+                    L"E:\\trigger_ac7vr\\enable_stereo_probe.flag") != INVALID_FILE_ATTRIBUTES;
+                if (requested) {
+                    using EnableHmdNativeFn = bool (*)(bool);
+                    const auto enable_hmd = reinterpret_cast<EnableHmdNativeFn>(module + kEnableHmdNativeRva);
+                    const bool result = enable_hmd(true);
+                    fwprintf(file,
+                        L"stereo_probe request=1 native_return=%u hmd_enabled=%u stereo_enabled=%u\n",
+                        static_cast<unsigned>(result), static_cast<unsigned>(g_fake_hmd_enabled.load()),
+                        static_cast<unsigned>(g_fake_stereo_enabled.load()));
+                } else {
+                    fwprintf(file, L"stereo_probe request=0 reason=flag_missing\n");
+                }
                 changed = true;
             }
 

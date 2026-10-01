@@ -2,3 +2,4 @@ evidence/
 build/
 __pycache__/
 probe.log
+enable_stereo_probe.flag

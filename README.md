@@ -64,7 +64,7 @@ Inspect a runtime code RVA or a table of pointers after the capture:
 
 ```powershell
 python inspect_runtime_image.py 0x1ACCFD9
-python inspect_runtime_image.py 0x3ACC7B8 --table 16
+python inspect_runtime_image.py 0x2D4E7E0 --table 16
 ```
 
 The inspector requires the same `capstone` Python package used by the existing disassembly scripts and rejects incomplete captures.
@@ -82,6 +82,10 @@ Output:
 
 For the persistent-interface test, place that DLL next to `Ace7Game.exe`, start the game manually, enter the 3D aircraft viewer, remain there for roughly 10-15 seconds, then exit normally. A crash is also useful evidence because the immediate slot trace is designed to survive it. Do not launch the game from the probe tooling.
 
+The monitor stereo experiment is opt-in: create `E:\trigger_ac7vr\enable_stereo_probe.flag` before a manual launch to request it. The probe first captures its disabled baseline at ten seconds, then invokes the recovered `EnableHMD(true)` native at RVA `0x0118F1E0` once at fifteen seconds, provided it still owns both engine interfaces. The native only dispatches into the probe's HMD/stereo enable methods in this build. The request and resulting enable state are recorded in `probe.log`. Removing the flag before the next launch restores the disabled baseline; it does not disable an already running experiment.
+
+For this experiment, leave the 3D aircraft viewer open for at least twenty seconds. The stereo interface splits each viewport into adjacent left/right rectangles, provides a 90-degree horizontal perspective with infinite reversed-Z depth, and offsets the two parallel cameras by a fixed 64 mm IPD along the camera's rotated right axis. It uses the engine's normal render target and reports no custom present, target manager, stereo layers, or spectator screen. This is a monitor-only rendering probe: there is still no headset transport or live head tracking. The canvas initialization hook is a no-op, so UI placement is not a validation target yet.
+
 ## Current decision gate
 
 The configuration and minimal-ABI gates are closed: `bStartInVR` reaches the real `UGeneralProjectSettings` default object, and the reconstructed interfaces satisfy the known `IsHMDConnected`, `IsHMDEnabled`, `EnableHMD`, device-enable, and stereo-enable calls.
@@ -92,8 +96,10 @@ That shared-pointer failure did not recur in the 2026-10-01 22:48 manual run, wi
 
 The UE4 4.18 interface definitions also expose a second return-by-value hazard: XR slot 24, `GetStereoRenderingDevice`, returns another 16-byte `TSharedPtr`. An ABI regression test now covers both shared-pointer results, plus the floating-point return ABI for HMD slot 25 (`GetLensCenterOffset`). The probe provides explicit neutral implementations for the known lifecycle and rendering calls observed so far: XR slots 24/25/27-30, HMD slots 9/12/13/25/33/35/36, and stereo slot 13 (`GetStereoLayers`). Run `ctest --test-dir build -C Release --output-on-failure` after building `fake_interface_abi_test`.
 
-In the 2026-10-01 23:21:27 manual run, the snapshot explicitly reported `hmd_enabled=0 stereo_enabled=0`, with no calls to the mapped enable methods (HMD device slot 11 / stereo slot 2). The engine's repeated queries therefore do not establish VR activation. The next activation experiment must first provide safe view/projection methods and then verify actual stereo enablement, rather than treating query counts as proof of VR rendering.
+In the 2026-10-01 23:21:27 and 23:29:17 manual runs, the snapshot explicitly reported `hmd_enabled=0 stereo_enabled=0`, with no calls to the mapped enable methods (HMD device slot 11 / stereo slot 2). The engine's repeated queries therefore do not establish VR activation. The monitor stereo experiment now supplies the view/projection methods before requesting enablement. Its success gate is a recorded enabled state, calls to stereo slots 3/5/6 (view rectangle, eye offset, projection), and an observed pair of rendered views. Passing the offline ABI tests alone does not establish this gate.
 
-Device slot 52 remains unidentified. The stock UE4.18 `IHeadMountedDisplay` vtable ends at slot 48, so slot 52 is outside the standard interface surface. The runtime capture consistently returns to RVA `0x01ACCFD9`, but the preceding instruction calls a different object's vtable offset `+0x378`, not the synthetic device's `+0x1A0`. This return address is not sufficient to identify the immediate slot-52 dispatch: an intermediate tail call is one possible explanation. The full runtime section capture is intended to recover the intervening route before assigning a signature. The other unknown method, XR slot 9, matches `GetCurrentPose` in the UE4.18 headers and has a direct `+0x48` call at RVA `0x0165F56B` with device 0 and quaternion/vector output buffers.
+The 23:29:17 run captured all three runtime sections completely: 38,857,296 bytes of `.text`, 17,074,486 bytes of `.rdata`, and 2,446,980 bytes of `.pdata`. It resolves the slot-52 route: the engine dispatch at `0x01ACCFD3` through `+0x378` reaches the function at `0x01AD3BC0`, which checks the `nohmd` command-line option, obtains the HMD device through XR slot 23, checks `IsHMDConnected`, and tail-jumps through HMD device `+0x1A0` at `0x01AD3C38`. This explains why the neutral stub's return address named the engine's outer callsite. No explicit arguments beyond `this` are prepared for that final dispatch, and the caller ignores its return, so the probe now supplies a void no-op startup hook at slot 52. The exact AC7 method name remains unknown; slot 52 is outside the standard UE4.18 device interface ending at slot 48.
+
+The other unknown method, XR slot 9, matches `GetCurrentPose` in the UE4.18 headers and has a direct `+0x48` call at RVA `0x0165F56B` with device 0 and quaternion/vector output buffers. It still returns false through the neutral stub; the observed caller initializes those buffers to a default pose before the call.
 
 Returning neutral values still does not implement head tracking or headset rendering. OpenXR integration remains gated on identifying the necessary interface surface and confirming where stereo view setup begins.
