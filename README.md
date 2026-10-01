@@ -48,9 +48,15 @@ The community UEVR compatibility plugin is also useful evidence: it resolves AC7
 
 `src/xinput_proxy.cpp` builds a diagnostic `xinput1_3.dll` proxy. AC7 imports only XInput ordinals 2 and 3 (`XInputGetState` and `XInputSetState`), both of which are forwarded to the system DLL.
 
-The probe does not patch game code. Ten seconds after load it records the main module identity, code bytes at known VR/HMD targets, the HMD/stereo interface pointers, and the runtime `GeneralProjectSettings` state used to verify the startup flags to:
+The current feasibility probe installs synthetic XR/HMD and stereo interfaces as soon as `GEngine` becomes available, but only when the corresponding PC-build slots are still null. The five ABI calls already validated from runtime disassembly keep explicit implementations; the remaining vtable slots use numbered neutral stubs so the next missing interface surface can be identified from one run.
+
+The probe records the main module identity, code bytes at known VR/HMD targets, the HMD/stereo interface pointers, startup settings, and per-slot call counts to:
 
 `E:\trigger_ac7vr\probe.log`
+
+First hits to unknown slots and access-violation context are flushed immediately to:
+
+`E:\trigger_ac7vr\evidence\persistent_slots.log`
 
 Build:
 
@@ -63,12 +69,10 @@ Output:
 
 `build\Release\xinput1_3.dll`
 
-For the first runtime test, place that DLL next to `Ace7Game.exe`, start the game manually, remain at the main menu for at least ten seconds, exit normally, then inspect the probe log. Remove the proxy DLL afterwards.
+For the persistent-interface test, place that DLL next to `Ace7Game.exe`, start the game manually, enter the 3D aircraft viewer, remain there for roughly 10-15 seconds, then exit normally. A crash is also useful evidence because the immediate slot trace is designed to survive it. Do not launch the game from the probe tooling.
 
 ## Current decision gate
 
-The next result decides the route:
+The configuration and minimal-ABI gates are closed: `bStartInVR` reaches the real `UGeneralProjectSettings` default object, and the reconstructed interfaces satisfy the known `IsHMDConnected`, `IsHMDEnabled`, `EnableHMD`, device-enable, and stereo-enable calls.
 
-1. Read the runtime `UGeneralProjectSettings` default object and verify whether the current `Game.ini` produces `bStartInVR=1`, `bStartFromVRHangar=1`, and `bStartInAR=0`.
-2. If the flags are loaded, treat the missing HMD/stereo interfaces as the next blocker and map the minimum virtual interface required to satisfy AC7's retained VR checks.
-3. Only after AC7's retained VR mode can be entered should the spike proceed to an OpenXR rendering backend.
+The next run must establish which additional virtual methods AC7/UE4 touches when those interfaces remain installed and whether the retained VR path advances. Implement only the methods demonstrated by that trace. An OpenXR rendering backend remains out of scope until the retained VR route can stay active through this interface layer.

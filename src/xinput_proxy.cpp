@@ -2,10 +2,12 @@
 #include <xinput.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 namespace {
 using XInputGetStateFn = decltype(&XInputGetState);
@@ -16,21 +18,107 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-// Throwaway ABI probe objects. These are only installed into the engine slots
-// for the duration of TestFakeHmdInterfaces(), then the original pointers are
-// restored immediately.
+// Persistent feasibility-probe objects. They intentionally implement only the
+// small ABI surface already recovered from runtime disassembly. Every other
+// vtable slot is backed by a numbered neutral stub so a single manual run can
+// reveal which additional calls the retained VR path requires.
 struct FakeInterface {
     void** vtable;
 };
 
-std::array<void*, 32> g_fake_hmd_vtable{};
-std::array<void*, 16> g_fake_device_vtable{};
-std::array<void*, 8> g_fake_stereo_vtable{};
+enum class FakeInterfaceKind : std::uint32_t {
+    Hmd = 1,
+    Device = 2,
+    Stereo = 3,
+};
+
+constexpr std::size_t kFakeVtableSlots = 128;
+constexpr wchar_t kImmediateSlotLogPath[] = L"E:\\trigger_ac7vr\\evidence\\persistent_slots.log";
+
+std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_hmd_slot_hits{};
+std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_device_slot_hits{};
+std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_stereo_slot_hits{};
+std::atomic<std::uint32_t> g_last_interface{0};
+std::atomic<std::uint32_t> g_last_slot{0};
+
+const char* InterfaceName(FakeInterfaceKind kind) {
+    switch (kind) {
+        case FakeInterfaceKind::Hmd: return "hmd";
+        case FakeInterfaceKind::Device: return "device";
+        case FakeInterfaceKind::Stereo: return "stereo";
+    }
+    return "unknown";
+}
+
+std::array<std::atomic<std::uint32_t>, kFakeVtableSlots>& SlotHits(FakeInterfaceKind kind) {
+    switch (kind) {
+        case FakeInterfaceKind::Hmd: return g_hmd_slot_hits;
+        case FakeInterfaceKind::Device: return g_device_slot_hits;
+        case FakeInterfaceKind::Stereo: return g_stereo_slot_hits;
+    }
+    return g_hmd_slot_hits;
+}
+
+void AppendImmediateDiagnostic(const char* text, DWORD length) {
+    HANDLE file = CreateFileW(kImmediateSlotLogPath, FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(file, text, length, &written, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+}
+
+void RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
+    if (slot >= kFakeVtableSlots) {
+        return;
+    }
+
+    auto& counter = SlotHits(kind)[slot];
+    const auto previous = counter.fetch_add(1, std::memory_order_relaxed);
+    g_last_interface.store(static_cast<std::uint32_t>(kind), std::memory_order_relaxed);
+    g_last_slot.store(static_cast<std::uint32_t>(slot), std::memory_order_relaxed);
+
+    // The first hit to an unknown slot is persisted synchronously. If the
+    // neutral return value immediately leads to an access violation, this line
+    // still survives even when the monitoring thread never gets another tick.
+    if (unknown && previous == 0) {
+        char line[160]{};
+        const int length = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                                       "unknown_slot interface=%s slot=%zu offset=0x%zX\r\n",
+                                       InterfaceName(kind), slot, slot * sizeof(void*));
+        if (length > 0) {
+            AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+        }
+    }
+}
+
+template <FakeInterfaceKind Kind, std::size_t Slot>
+std::uintptr_t FakeUnknownSlot(FakeInterface*, std::uintptr_t, std::uintptr_t, std::uintptr_t) {
+    RecordSlot(Kind, Slot, true);
+    return 0;
+}
+
+template <FakeInterfaceKind Kind, std::size_t... Slots>
+std::array<void*, sizeof...(Slots)> MakeStubVtable(std::index_sequence<Slots...>) {
+    return {reinterpret_cast<void*>(&FakeUnknownSlot<Kind, Slots>)...};
+}
+
+std::array<void*, kFakeVtableSlots> g_fake_hmd_vtable =
+    MakeStubVtable<FakeInterfaceKind::Hmd>(std::make_index_sequence<kFakeVtableSlots>{});
+std::array<void*, kFakeVtableSlots> g_fake_device_vtable =
+    MakeStubVtable<FakeInterfaceKind::Device>(std::make_index_sequence<kFakeVtableSlots>{});
+std::array<void*, kFakeVtableSlots> g_fake_stereo_vtable =
+    MakeStubVtable<FakeInterfaceKind::Stereo>(std::make_index_sequence<kFakeVtableSlots>{});
 FakeInterface g_fake_hmd{g_fake_hmd_vtable.data()};
 FakeInterface g_fake_device{g_fake_device_vtable.data()};
 FakeInterface g_fake_stereo{g_fake_stereo_vtable.data()};
 bool g_fake_hmd_enabled = false;
 bool g_fake_stereo_enabled = false;
+PVOID g_vectored_exception_handler = nullptr;
 
 constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
     {L"ToggleVRTestMissionMenu_command", 0x00916380},
@@ -66,39 +154,96 @@ constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C93398;
 constexpr std::uintptr_t kGeneralProjectSettingsRuntimeRegionRva = 0x01455000;
 constexpr std::size_t kGeneralProjectSettingsRuntimeRegionSize = 0x4000;
 
+void* FakeHmdGetDeviceName(FakeInterface*, void* out_name) {
+    RecordSlot(FakeInterfaceKind::Hmd, 0, false);
+    if (out_name) {
+        *reinterpret_cast<std::uint64_t*>(out_name) = 0;
+    }
+    return out_name;
+}
+
 void* FakeHmdGetDevice(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 0xB8 / sizeof(void*), false);
     return &g_fake_device;
 }
 
 bool FakeHmdIsEnabled(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Hmd, 0xD0 / sizeof(void*), false);
     return g_fake_hmd_enabled;
 }
 
 bool FakeDeviceIsConnected(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Device, 0x40 / sizeof(void*), false);
     return true;
 }
 
 void FakeDeviceEnable(FakeInterface*, bool enabled) {
+    RecordSlot(FakeInterfaceKind::Device, 0x58 / sizeof(void*), false);
     g_fake_hmd_enabled = enabled;
 }
 
+bool FakeStereoIsEnabled(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 0, false);
+    return g_fake_stereo_enabled;
+}
+
+bool FakeStereoIsEnabledOnNextFrame(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 1, false);
+    return g_fake_stereo_enabled;
+}
+
 bool FakeStereoEnable(FakeInterface*, bool enabled) {
+    RecordSlot(FakeInterfaceKind::Stereo, 0x10 / sizeof(void*), false);
     g_fake_stereo_enabled = enabled;
+    g_fake_hmd_enabled = enabled;
     return true;
 }
 
 void InitializeFakeInterfaces() {
-    g_fake_hmd_vtable.fill(nullptr);
-    g_fake_device_vtable.fill(nullptr);
-    g_fake_stereo_vtable.fill(nullptr);
+    g_fake_hmd_vtable = MakeStubVtable<FakeInterfaceKind::Hmd>(std::make_index_sequence<kFakeVtableSlots>{});
+    g_fake_device_vtable = MakeStubVtable<FakeInterfaceKind::Device>(std::make_index_sequence<kFakeVtableSlots>{});
+    g_fake_stereo_vtable = MakeStubVtable<FakeInterfaceKind::Stereo>(std::make_index_sequence<kFakeVtableSlots>{});
 
+    g_fake_hmd_vtable[0] = reinterpret_cast<void*>(&FakeHmdGetDeviceName);
     g_fake_hmd_vtable[0xB8 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdGetDevice);
     g_fake_hmd_vtable[0xD0 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdIsEnabled);
     g_fake_device_vtable[0x40 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceIsConnected);
     g_fake_device_vtable[0x58 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceEnable);
+    g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
+    g_fake_stereo_vtable[1] = reinterpret_cast<void*>(&FakeStereoIsEnabledOnNextFrame);
     g_fake_stereo_vtable[0x10 / sizeof(void*)] = reinterpret_cast<void*>(&FakeStereoEnable);
     g_fake_hmd_enabled = false;
     g_fake_stereo_enabled = false;
+
+    for (auto& hit : g_hmd_slot_hits) hit.store(0, std::memory_order_relaxed);
+    for (auto& hit : g_device_slot_hits) hit.store(0, std::memory_order_relaxed);
+    for (auto& hit : g_stereo_slot_hits) hit.store(0, std::memory_order_relaxed);
+    g_last_interface.store(0, std::memory_order_relaxed);
+    g_last_slot.store(0, std::memory_order_relaxed);
+}
+
+LONG CALLBACK ProbeVectoredExceptionHandler(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    char line[256]{};
+    const auto kind = static_cast<FakeInterfaceKind>(g_last_interface.load(std::memory_order_relaxed));
+    const auto slot = g_last_slot.load(std::memory_order_relaxed);
+    const int length = _snprintf_s(
+        line, sizeof(line), _TRUNCATE,
+        "exception code=0x%08lX address=%p last_interface=%s last_slot=%u last_offset=0x%X\r\n",
+        static_cast<unsigned long>(code), info->ExceptionRecord->ExceptionAddress,
+        InterfaceName(kind), slot, slot * static_cast<unsigned>(sizeof(void*)));
+    if (length > 0) {
+        AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 FILE* OpenLog() {
@@ -189,69 +334,89 @@ void LogHmdState(FILE* file, const std::uint8_t* module) {
              reinterpret_cast<void*>(connected_method), reinterpret_cast<void*>(enabled_method));
 }
 
-void TestFakeHmdInterfaces(FILE* file, std::uint8_t* module) {
-    using IsHmdConnectedFn = bool (*)();
-    using IsHmdEnabledFn = bool (*)();
-    using EnableHmdFn = bool (*)(bool);
+struct PersistentProbeState {
+    std::uintptr_t engine = 0;
+    void** stereo_slot = nullptr;
+    void** hmd_slot = nullptr;
+    bool installed = false;
+};
 
+void ResetImmediateSlotLog() {
+    HANDLE file = CreateFileW(kImmediateSlotLogPath, GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    static constexpr char header[] = "trigger_ac7vr persistent interface slot trace\r\n";
+    DWORD written = 0;
+    WriteFile(file, header, static_cast<DWORD>(sizeof(header) - 1), &written, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+}
+
+bool TryInstallPersistentFakeInterfaces(FILE* file, std::uint8_t* module, PersistentProbeState& state) {
     std::uintptr_t engine = 0;
     SIZE_T read = 0;
     if (!ReadProcessMemory(GetCurrentProcess(), module + kEngineGlobalRva, &engine, sizeof(engine), &read) ||
         read != sizeof(engine) || engine == 0) {
-        fwprintf(file, L"fake_hmd_probe skipped=engine_unavailable\n");
-        return;
+        return false;
     }
 
     auto* stereo_slot = reinterpret_cast<void**>(engine + kStereoRenderingDeviceOffset);
     auto* hmd_slot = reinterpret_cast<void**>(engine + kHmdDeviceOffset);
-    void* original_stereo = *stereo_slot;
-    void* original_hmd = *hmd_slot;
-    if (original_stereo != nullptr || original_hmd != nullptr) {
-        fwprintf(file, L"fake_hmd_probe skipped=slots_already_populated stereo=%p hmd=%p\n",
-                 original_stereo, original_hmd);
-        return;
+    if (*stereo_slot != nullptr || *hmd_slot != nullptr) {
+        return false;
     }
 
     InitializeFakeInterfaces();
 
-    bool connected = false;
-    bool enabled_before = false;
-    bool enable_true = false;
-    bool enabled_after = false;
-    bool enable_false = false;
-    bool enabled_final = false;
-    DWORD exception_code = 0;
-
-    InterlockedExchangePointer(stereo_slot, &g_fake_stereo);
-    InterlockedExchangePointer(hmd_slot, &g_fake_hmd);
-
-    __try {
-        const auto is_connected = reinterpret_cast<IsHmdConnectedFn>(module + kIsHmdConnectedNativeRva);
-        const auto is_enabled = reinterpret_cast<IsHmdEnabledFn>(module + kIsHmdEnabledNativeRva);
-        const auto enable_hmd = reinterpret_cast<EnableHmdFn>(module + kEnableHmdNativeRva);
-
-        connected = is_connected();
-        enabled_before = is_enabled();
-        enable_true = enable_hmd(true);
-        enabled_after = is_enabled();
-        enable_false = enable_hmd(false);
-        enabled_final = is_enabled();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        exception_code = 0xFFFFFFFF;
+    // Only claim null slots. If another backend appears between the reads and
+    // the exchanges, leave it alone and undo our first insertion.
+    void* prior_stereo = InterlockedCompareExchangePointer(stereo_slot, &g_fake_stereo, nullptr);
+    if (prior_stereo != nullptr) {
+        return false;
+    }
+    void* prior_hmd = InterlockedCompareExchangePointer(hmd_slot, &g_fake_hmd, nullptr);
+    if (prior_hmd != nullptr) {
+        InterlockedCompareExchangePointer(stereo_slot, nullptr, &g_fake_stereo);
+        return false;
     }
 
-    InterlockedExchangePointer(hmd_slot, original_hmd);
-    InterlockedExchangePointer(stereo_slot, original_stereo);
+    state.engine = engine;
+    state.stereo_slot = stereo_slot;
+    state.hmd_slot = hmd_slot;
+    state.installed = true;
+
+    if (!g_vectored_exception_handler) {
+        g_vectored_exception_handler = AddVectoredExceptionHandler(1, ProbeVectoredExceptionHandler);
+    }
 
     fwprintf(file,
-             L"fake_hmd_probe connected=%u enabled_before=%u enable_true=%u enabled_after=%u "
-             L"enable_false=%u enabled_final=%u fake_stereo_enabled=%u exception=0x%08X restored_hmd=%u restored_stereo=%u\n",
-             static_cast<unsigned>(connected), static_cast<unsigned>(enabled_before),
-             static_cast<unsigned>(enable_true), static_cast<unsigned>(enabled_after),
-             static_cast<unsigned>(enable_false), static_cast<unsigned>(enabled_final),
-             static_cast<unsigned>(g_fake_stereo_enabled), exception_code,
-             static_cast<unsigned>(*hmd_slot == original_hmd),
-             static_cast<unsigned>(*stereo_slot == original_stereo));
+             L"persistent_fake_hmd installed engine=%p stereo_slot=%p hmd_slot=%p "
+             L"stereo=%p hmd=%p veh=%p\n",
+             reinterpret_cast<void*>(engine), stereo_slot, hmd_slot,
+             &g_fake_stereo, &g_fake_hmd, g_vectored_exception_handler);
+    fflush(file);
+    return true;
+}
+
+template <std::size_t N>
+bool LogSlotChanges(FILE* file, const wchar_t* interface_name,
+                    const std::array<std::atomic<std::uint32_t>, N>& hits,
+                    std::array<std::uint32_t, N>& previous) {
+    bool changed = false;
+    for (std::size_t slot = 0; slot < N; ++slot) {
+        const auto current = hits[slot].load(std::memory_order_relaxed);
+        if (current == previous[slot]) {
+            continue;
+        }
+        fwprintf(file, L"slot_hit interface=%ls slot=%zu offset=0x%zX count=%u delta=%u\n",
+                 interface_name, slot, slot * sizeof(void*), current, current - previous[slot]);
+        previous[slot] = current;
+        changed = true;
+    }
+    return changed;
 }
 
 void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
@@ -329,7 +494,16 @@ void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
 }
 
 DWORD WINAPI ProbeThread(void*) {
-    Sleep(10000);
+    wchar_t exe_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    const std::wstring full_exe_path(exe_path);
+    const auto separator = full_exe_path.find_last_of(L"\\/");
+    const std::wstring exe_name = separator == std::wstring::npos
+        ? full_exe_path
+        : full_exe_path.substr(separator + 1);
+    if (_wcsicmp(exe_name.c_str(), L"Ace7Game.exe") != 0) {
+        return 0;
+    }
 
     FILE* file = OpenLog();
     if (!file) {
@@ -342,9 +516,8 @@ DWORD WINAPI ProbeThread(void*) {
              now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
 
     const auto module = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
-    wchar_t exe_path[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
     fwprintf(file, L"exe=%ls\nbase=%p\n", exe_path, module);
+    fflush(file);
 
     if (module) {
         const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
@@ -353,15 +526,58 @@ DWORD WINAPI ProbeThread(void*) {
                  nt->FileHeader.TimeDateStamp,
                  nt->OptionalHeader.SizeOfImage,
                  nt->OptionalHeader.AddressOfEntryPoint);
+        fflush(file);
 
-        for (const auto& [label, rva] : kProbeRvas) {
-            LogBytes(file, label, module + rva, 160);
+        ResetImmediateSlotLog();
+
+        PersistentProbeState state{};
+        std::array<std::uint32_t, kFakeVtableSlots> previous_hmd_hits{};
+        std::array<std::uint32_t, kFakeVtableSlots> previous_device_hits{};
+        std::array<std::uint32_t, kFakeVtableSlots> previous_stereo_hits{};
+        const ULONGLONG start = GetTickCount64();
+        bool detailed_dump_done = false;
+        bool ownership_lost = false;
+
+        for (;;) {
+            if (!state.installed && !ownership_lost) {
+                TryInstallPersistentFakeInterfaces(file, module, state);
+            }
+
+            bool changed = false;
+            changed |= LogSlotChanges(file, L"hmd", g_hmd_slot_hits, previous_hmd_hits);
+            changed |= LogSlotChanges(file, L"device", g_device_slot_hits, previous_device_hits);
+            changed |= LogSlotChanges(file, L"stereo", g_stereo_slot_hits, previous_stereo_hits);
+
+            if (state.installed &&
+                (*state.hmd_slot != &g_fake_hmd || *state.stereo_slot != &g_fake_stereo)) {
+                fwprintf(file,
+                         L"persistent_fake_hmd ownership_lost hmd_now=%p stereo_now=%p\n",
+                         *state.hmd_slot, *state.stereo_slot);
+                state.installed = false;
+                ownership_lost = true;
+                changed = true;
+            }
+
+            if (!detailed_dump_done && GetTickCount64() - start >= 10000) {
+                for (const auto& [label, rva] : kProbeRvas) {
+                    LogBytes(file, label, module + rva, 160);
+                }
+                DumpRuntimeRegion(file, module);
+                LogGeneralProjectSettings(file, module);
+                LogHmdState(file, module);
+                fwprintf(file, L"persistent_fake_hmd snapshot installed=%u hmd_enabled=%u stereo_enabled=%u\n",
+                         static_cast<unsigned>(state.installed),
+                         static_cast<unsigned>(g_fake_hmd_enabled),
+                         static_cast<unsigned>(g_fake_stereo_enabled));
+                detailed_dump_done = true;
+                changed = true;
+            }
+
+            if (changed) {
+                fflush(file);
+            }
+            Sleep(25);
         }
-        DumpRuntimeRegion(file, module);
-        LogGeneralProjectSettings(file, module);
-        LogHmdState(file, module);
-        TestFakeHmdInterfaces(file, module);
-        LogHmdState(file, module);
     }
 
     fflush(file);
