@@ -36,6 +36,8 @@ struct FakeSharedPointerResult {
 };
 static_assert(sizeof(FakeSharedPointerResult) == 16);
 
+struct FakeVector2 { float x, y; };
+
 enum class FakeInterfaceKind : std::uint32_t {
     Hmd = 1,
     Device = 2,
@@ -345,6 +347,12 @@ void* FakeDeviceGetDistortionTextureLeft(FakeInterface*) {
     return nullptr;
 }
 
+FakeVector2* FakeDeviceGetTextureScaleLeft(FakeInterface*, FakeVector2* out) {
+    RecordSlot(FakeInterfaceKind::Device, 40, false);
+    if (out) *out = {0.0f, 0.0f};
+    return out;
+}
+
 void FakeDeviceStartupHook(FakeInterface*) {
     // AC7 engine RVA 0x01AD3BC0 tail-dispatches to device +0x1A0 with
     // only this configured. The engine caller ignores the return value.
@@ -368,7 +376,6 @@ bool FakeStereoEnable(FakeInterface*, bool enabled) {
     return enabled;
 }
 
-struct FakeVector2 { float x, y; };
 struct FakeVector3 { float x, y, z; };
 struct FakeRotator { float pitch, yaw, roll; };
 struct FakeMatrix { float m[4][4]; };
@@ -421,7 +428,7 @@ void FakeStereoCalculateViewOffset(FakeInterface*, std::int32_t pass, FakeRotato
     location.z += offset * (-sr * cp);
 }
 
-FakeMatrix* FakeStereoGetProjection(FakeInterface*, FakeMatrix* out, std::int32_t pass) {
+FakeMatrix* FakeStereoGetProjection(FakeInterface*, std::int32_t pass, FakeMatrix* out) {
     const bool first = RecordSlot(FakeInterfaceKind::Stereo, 6, false);
     if (out) {
         *out = {};
@@ -504,6 +511,7 @@ void InitializeFakeInterfaces() {
     g_fake_device_vtable[33] = reinterpret_cast<void*>(&FakeDeviceDrawDistortionMesh);
     g_fake_device_vtable[35] = reinterpret_cast<void*>(&FakeDeviceUpdatePostProcessSettings);
     g_fake_device_vtable[36] = reinterpret_cast<void*>(&FakeDeviceGetDistortionTextureLeft);
+    g_fake_device_vtable[40] = reinterpret_cast<void*>(&FakeDeviceGetTextureScaleLeft);
     g_fake_device_vtable[52] = reinterpret_cast<void*>(&FakeDeviceStartupHook);
     g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
     g_fake_stereo_vtable[1] = reinterpret_cast<void*>(&FakeStereoIsEnabledOnNextFrame);

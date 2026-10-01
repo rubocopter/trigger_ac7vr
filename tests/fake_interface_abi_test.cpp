@@ -1,4 +1,5 @@
 #include <cmath>
+#include <type_traits>
 #include "../src/xinput_proxy.cpp"
 
 // Exercise the actual vtable through the x64 hidden-result-buffer ABI. Poison
@@ -11,6 +12,12 @@ struct SharedPointerOutput {
 
 int main() {
     InitializeFakeInterfaces();
+
+    // AC7's renderer calls IStereoRendering::GetStereoProjectionMatrix with
+    // `this` in RCX, the eye/pass in RDX, and the hidden FMatrix result buffer
+    // in R8. Keep the stub signature pinned to that observed ABI.
+    static_assert(std::is_same_v<decltype(&FakeStereoGetProjection),
+        FakeMatrix* (*)(FakeInterface*, std::int32_t, FakeMatrix*)>);
     using GetCameraFn = SharedPointerOutput* (*)(FakeInterface*, SharedPointerOutput*, std::int32_t);
     auto get_camera = reinterpret_cast<GetCameraFn>(g_fake_hmd.vtable[22]);
     for (const std::int32_t device_id : {0, 1, -1}) {
@@ -61,6 +68,23 @@ int main() {
         return 1;
     }
 
+    struct Vector2Output { float x, y; };
+    struct GuardedVector2Output {
+        std::uint64_t before;
+        Vector2Output value;
+        std::uint64_t after;
+    } texture_scale;
+    using GetTextureScaleFn = Vector2Output* (*)(FakeInterface*, Vector2Output*);
+    auto get_texture_scale = reinterpret_cast<GetTextureScaleFn>(g_fake_device.vtable[40]);
+    memset(&texture_scale, 0xA5, sizeof(texture_scale));
+    auto* texture_scale_result = get_texture_scale(&g_fake_device, &texture_scale.value);
+    if (texture_scale_result != &texture_scale.value || texture_scale.value.x != 0.0f ||
+        texture_scale.value.y != 0.0f || texture_scale.before != 0xA5A5A5A5A5A5A5A5ULL ||
+        texture_scale.after != 0xA5A5A5A5A5A5A5A5ULL) {
+        fprintf(stderr, "FAIL: device slot 40 must return an initialized zero FVector2D\n");
+        return 1;
+    }
+
     // Projection matrices are returned by value through a hidden 64-byte
     // buffer. A scalar stub leaves the renderer using uninitialized memory.
     struct MatrixOutput { float m[4][4]; };
@@ -69,11 +93,11 @@ int main() {
         MatrixOutput matrix;
         std::uint64_t after;
     } projection;
-    using ProjectionFn = MatrixOutput* (*)(FakeInterface*, MatrixOutput*, std::int32_t);
+    using ProjectionFn = MatrixOutput* (*)(FakeInterface*, std::int32_t, MatrixOutput*);
     auto projection_fn = reinterpret_cast<ProjectionFn>(g_fake_stereo.vtable[6]);
     for (std::int32_t eye : {1, 2}) {
         memset(&projection, 0xA5, sizeof(projection));
-        auto* result = projection_fn(&g_fake_stereo, &projection.matrix, eye);
+        auto* result = projection_fn(&g_fake_stereo, eye, &projection.matrix);
         if (result != &projection.matrix || projection.before != 0xA5A5A5A5A5A5A5A5ULL ||
             projection.after != 0xA5A5A5A5A5A5A5A5ULL) {
             fprintf(stderr, "FAIL: stereo projection must return its 64-byte buffer without overwriting guards\n");
