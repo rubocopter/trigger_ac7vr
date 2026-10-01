@@ -153,6 +153,17 @@ void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
             continue;
         }
 
+        // UE4 UObjectBase stores ClassPrivate at +0x10 on this 64-bit build.
+        // The GeneralProjectSettings CDO must point back to the UClass object
+        // we are scanning, which lets us reject unrelated UObject pointers.
+        std::uintptr_t candidate_class = 0;
+        SIZE_T candidate_class_read = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate + 0x10),
+                               &candidate_class, sizeof(candidate_class), &candidate_class_read) ||
+            candidate_class_read != sizeof(candidate_class) || candidate_class != klass) {
+            continue;
+        }
+
         std::uint8_t start_in_vr = 0xFF;
         std::uint8_t start_from_vr_hangar = 0xFF;
         std::uint8_t start_in_ar = 0xFF;
