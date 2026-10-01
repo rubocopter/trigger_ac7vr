@@ -33,6 +33,15 @@ The reflected `ToggleVRTestMissionMenu` entry maps to RVA `0x0091B9A0`. Runtime 
 
 The HMD natives dispatch through an engine-owned interface pointer: both load the same engine global at RVA `0x03CBBC28`, then the HMD device/interface at offset `+0xAD8`. `IsHeadMountedDisplayConnected` calls virtual slot `+0xB8`; `IsHeadMountedDisplayEnabled` calls virtual slot `+0xD0` and returns false when the interface is absent or reports disabled. The probe now records this runtime pointer chain and its method addresses directly.
 
+Runtime probing confirms that this HMD slot is null on the PC build at menu time. The retained startup settings are also real generated UE4 properties, with SetBit helpers that write full bytes rather than packed bit masks:
+
+- `bStartInVR` -> `UGeneralProjectSettings + 0x10B`
+- `bStartFromVRHangar` -> `UGeneralProjectSettings + 0x10C`
+- `bStartInAR` -> `UGeneralProjectSettings + 0x10D`
+- `bIsVRMode` -> owning object `+ 0x10`
+
+`EnableHMD` resolves to a separate native target at RVA `0x0118F1E0`, while `GetHMDDeviceName` dispatches through the same `engine + 0xAD8` interface.
+
 The community UEVR compatibility plugin is also useful evidence: it resolves AC7 objects such as `AcePlayerPawn`, `CameraViewComponent`, and `NimbusPlayerCameraManager`, while its camera enum confirms a retained `VR_CAMERA` entry. Its normal path uses `COCKPIT` rather than AC7's internal `VR_CAMERA`, so the original VR path remains worth probing independently.
 
 ## Runtime probe
@@ -60,6 +69,6 @@ For the first runtime test, place that DLL next to `Ace7Game.exe`, start the gam
 
 The next result decides the route:
 
-1. Confirm whether the engine's HMD interface at `engine + 0xAD8` is null on the PC build and identify any registered backend when present.
-2. Resolve the actual native implementation behind `ToggleVRTestMissionMenu` and test AC7's retained VR menu/camera path.
-3. If the retained path is usable and blocked only by the HMD interface, prototype the smallest PC XR/OpenXR backend needed to satisfy it.
+1. Test the retained `UGeneralProjectSettings` startup route with `bStartInVR=True` and `bStartFromVRHangar=True` in the user's `Game.ini`.
+2. Observe whether AC7 enters its retained VR menu/camera path even though the PC HMD interface is currently null.
+3. If that route is live and the HMD interface is the remaining blocker, prototype the smallest UE4 HMD interface needed to satisfy the game before adding an OpenXR renderer backend.
