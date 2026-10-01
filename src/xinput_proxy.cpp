@@ -94,7 +94,16 @@ DWORD WINAPI ProbeThread(void*) {
 }
 
 BOOL CALLBACK InitRealXInput(PINIT_ONCE, PVOID, PVOID*) {
-    g_real_xinput = LoadLibraryExW(L"xinput1_3.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    wchar_t system_dir[MAX_PATH]{};
+    const UINT system_dir_len = GetSystemDirectoryW(system_dir, MAX_PATH);
+    if (system_dir_len == 0 || system_dir_len >= MAX_PATH) {
+        return FALSE;
+    }
+
+    std::wstring real_xinput_path(system_dir, system_dir_len);
+    real_xinput_path += L"\\xinput1_3.dll";
+
+    g_real_xinput = LoadLibraryW(real_xinput_path.c_str());
     if (!g_real_xinput) {
         return FALSE;
     }
