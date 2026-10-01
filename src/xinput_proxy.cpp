@@ -72,9 +72,9 @@ void AppendImmediateDiagnostic(const char* text, DWORD length) {
     CloseHandle(file);
 }
 
-void RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
+bool RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
     if (slot >= kFakeVtableSlots) {
-        return;
+        return false;
     }
 
     auto& counter = SlotHits(kind)[slot];
@@ -94,11 +94,24 @@ void RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
             AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
         }
     }
+    return previous == 0;
 }
 
 template <FakeInterfaceKind Kind, std::size_t Slot>
-std::uintptr_t FakeUnknownSlot(FakeInterface*, std::uintptr_t, std::uintptr_t, std::uintptr_t) {
-    RecordSlot(Kind, Slot, true);
+std::uintptr_t FakeUnknownSlot(FakeInterface* self, std::uintptr_t arg1,
+                               std::uintptr_t arg2, std::uintptr_t arg3) {
+    const bool first = RecordSlot(Kind, Slot, true);
+    if (first) {
+        char line[256]{};
+        const int length = _snprintf_s(
+            line, sizeof(line), _TRUNCATE,
+            "unknown_args interface=%s slot=%zu this=%p arg1=%p arg2=%p arg3=%p\r\n",
+            InterfaceName(Kind), Slot, self, reinterpret_cast<void*>(arg1),
+            reinterpret_cast<void*>(arg2), reinterpret_cast<void*>(arg3));
+        if (length > 0) {
+            AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+        }
+    }
     return 0;
 }
 
@@ -223,7 +236,7 @@ void InitializeFakeInterfaces() {
 }
 
 LONG CALLBACK ProbeVectoredExceptionHandler(EXCEPTION_POINTERS* info) {
-    if (!info || !info->ExceptionRecord) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     const DWORD code = info->ExceptionRecord->ExceptionCode;
@@ -232,16 +245,92 @@ LONG CALLBACK ProbeVectoredExceptionHandler(EXCEPTION_POINTERS* info) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    char line[256]{};
+    const auto* context = info->ContextRecord;
+    char line[1024]{};
     const auto kind = static_cast<FakeInterfaceKind>(g_last_interface.load(std::memory_order_relaxed));
     const auto slot = g_last_slot.load(std::memory_order_relaxed);
+    const auto access_kind = info->ExceptionRecord->NumberParameters >= 1
+        ? info->ExceptionRecord->ExceptionInformation[0]
+        : 0;
+    const auto fault_address = info->ExceptionRecord->NumberParameters >= 2
+        ? info->ExceptionRecord->ExceptionInformation[1]
+        : 0;
     const int length = _snprintf_s(
         line, sizeof(line), _TRUNCATE,
-        "exception code=0x%08lX address=%p last_interface=%s last_slot=%u last_offset=0x%X\r\n",
+        "exception code=0x%08lX address=%p last_interface=%s last_slot=%u last_offset=0x%X "
+        "access=%llu fault=%p "
+        "rip=%p rsp=%p rbp=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p "
+        "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\r\n",
         static_cast<unsigned long>(code), info->ExceptionRecord->ExceptionAddress,
-        InterfaceName(kind), slot, slot * static_cast<unsigned>(sizeof(void*)));
+        InterfaceName(kind), slot, slot * static_cast<unsigned>(sizeof(void*)),
+        static_cast<unsigned long long>(access_kind), reinterpret_cast<void*>(fault_address),
+        reinterpret_cast<void*>(context->Rip), reinterpret_cast<void*>(context->Rsp),
+        reinterpret_cast<void*>(context->Rbp), reinterpret_cast<void*>(context->Rax),
+        reinterpret_cast<void*>(context->Rbx), reinterpret_cast<void*>(context->Rcx),
+        reinterpret_cast<void*>(context->Rdx), reinterpret_cast<void*>(context->Rsi),
+        reinterpret_cast<void*>(context->Rdi), reinterpret_cast<void*>(context->R8),
+        reinterpret_cast<void*>(context->R9), reinterpret_cast<void*>(context->R10),
+        reinterpret_cast<void*>(context->R11), reinterpret_cast<void*>(context->R12),
+        reinterpret_cast<void*>(context->R13), reinterpret_cast<void*>(context->R14),
+        reinterpret_cast<void*>(context->R15));
     if (length > 0) {
         AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+    }
+
+    std::array<std::uint8_t, 256> code_bytes{};
+    SIZE_T code_read = 0;
+    const auto code_address = reinterpret_cast<const void*>(
+        context->Rip >= 96 ? context->Rip - 96 : context->Rip);
+    if (ReadProcessMemory(GetCurrentProcess(), code_address, code_bytes.data(), code_bytes.size(), &code_read)) {
+        char bytes_line[1024]{};
+        int cursor = _snprintf_s(bytes_line, sizeof(bytes_line), _TRUNCATE,
+                                 "exception_code_bytes start=%p read=%llu data=",
+                                 code_address, static_cast<unsigned long long>(code_read));
+        if (cursor > 0) {
+            for (SIZE_T i = 0; i < code_read && cursor + 2 < static_cast<int>(sizeof(bytes_line)); ++i) {
+                const int wrote = _snprintf_s(bytes_line + cursor, sizeof(bytes_line) - cursor,
+                                              _TRUNCATE, "%02X", code_bytes[i]);
+                if (wrote <= 0) {
+                    break;
+                }
+                cursor += wrote;
+            }
+            if (cursor + 2 < static_cast<int>(sizeof(bytes_line))) {
+                bytes_line[cursor++] = '\r';
+                bytes_line[cursor++] = '\n';
+                AppendImmediateDiagnostic(bytes_line, static_cast<DWORD>(cursor));
+            }
+        }
+    }
+
+    std::array<std::uint8_t, 256> stack_bytes{};
+    SIZE_T stack_read = 0;
+    const auto stack_address = reinterpret_cast<const void*>(context->Rsp);
+    if (ReadProcessMemory(GetCurrentProcess(), stack_address, stack_bytes.data(), stack_bytes.size(), &stack_read)) {
+        char stack_line[1024]{};
+        int cursor = _snprintf_s(stack_line, sizeof(stack_line), _TRUNCATE,
+                                 "exception_stack start=%p read=%llu qwords=",
+                                 stack_address, static_cast<unsigned long long>(stack_read));
+        if (cursor > 0) {
+            for (SIZE_T i = 0; i + sizeof(std::uint64_t) <= stack_read &&
+                             cursor + 18 < static_cast<int>(sizeof(stack_line));
+                 i += sizeof(std::uint64_t)) {
+                std::uint64_t value = 0;
+                memcpy(&value, stack_bytes.data() + i, sizeof(value));
+                const int wrote = _snprintf_s(stack_line + cursor, sizeof(stack_line) - cursor,
+                                              _TRUNCATE, "%016llX ",
+                                              static_cast<unsigned long long>(value));
+                if (wrote <= 0) {
+                    break;
+                }
+                cursor += wrote;
+            }
+            if (cursor + 2 < static_cast<int>(sizeof(stack_line))) {
+                stack_line[cursor++] = '\r';
+                stack_line[cursor++] = '\n';
+                AppendImmediateDiagnostic(stack_line, static_cast<DWORD>(cursor));
+            }
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
