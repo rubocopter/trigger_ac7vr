@@ -43,7 +43,9 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
 constexpr std::uintptr_t kEngineGlobalRva = 0x03CBBC28;
 constexpr std::uintptr_t kHmdDeviceOffset = 0x0AD8;
 constexpr std::uintptr_t kStereoRenderingDeviceOffset = 0x0AC8;
-constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C932F8;
+constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C93320;
+constexpr std::uintptr_t kGeneralProjectSettingsRuntimeRegionRva = 0x01455000;
+constexpr std::size_t kGeneralProjectSettingsRuntimeRegionSize = 0x4000;
 
 FILE* OpenLog() {
     FILE* file = nullptr;
@@ -66,6 +68,29 @@ void LogBytes(FILE* file, const wchar_t* label, const std::uint8_t* address, std
         fwprintf(file, L"<ReadProcessMemory failed: %lu>", GetLastError());
     }
     fwprintf(file, L"\n");
+}
+
+void DumpRuntimeRegion(FILE* file, const std::uint8_t* module) {
+    std::array<std::uint8_t, kGeneralProjectSettingsRuntimeRegionSize> bytes{};
+    SIZE_T read = 0;
+    const auto address = module + kGeneralProjectSettingsRuntimeRegionRva;
+    if (!ReadProcessMemory(GetCurrentProcess(), address, bytes.data(), bytes.size(), &read)) {
+        fwprintf(file, L"general_project_settings_runtime_dump=<read failed:%lu>\n", GetLastError());
+        return;
+    }
+
+    FILE* dump = nullptr;
+    if (_wfopen_s(&dump, L"E:\\trigger_ac7vr\\evidence\\GeneralProjectSettings.runtime.bin", L"wb") != 0 || !dump) {
+        fwprintf(file, L"general_project_settings_runtime_dump=<open failed>\n");
+        return;
+    }
+
+    const auto written = fwrite(bytes.data(), 1, read, dump);
+    fclose(dump);
+    fwprintf(file,
+             L"general_project_settings_runtime_dump rva=0x%08llX address=%p read=%llu written=%zu\n",
+             static_cast<unsigned long long>(kGeneralProjectSettingsRuntimeRegionRva), address,
+             static_cast<unsigned long long>(read), written);
 }
 
 void LogHmdState(FILE* file, const std::uint8_t* module) {
@@ -212,6 +237,7 @@ DWORD WINAPI ProbeThread(void*) {
         for (const auto& [label, rva] : kProbeRvas) {
             LogBytes(file, label, module + rva, 160);
         }
+        DumpRuntimeRegion(file, module);
         LogGeneralProjectSettings(file, module);
         LogHmdState(file, module);
     }
