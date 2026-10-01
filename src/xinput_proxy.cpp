@@ -26,10 +26,10 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
     {L"bStartInVR_SetBit", 0x01456B70},
     {L"bStartFromVRHangar_SetBit", 0x01456B80},
     {L"bStartInAR_SetBit", 0x01456BC0},
-    {L"GeneralProjectSettings_candidate", 0x01456BD0},
-    {L"GeneralProjectSettings_thunk_0", 0x01456650},
-    {L"GeneralProjectSettings_thunk_1", 0x01456790},
-    {L"GeneralProjectSettings_thunk_2", 0x01456830},
+    {L"GeneralProjectSettings_thunk", 0x01456970},
+    {L"ConsoleSettings_thunk", 0x01456650},
+    {L"GameNetworkManagerSettings_thunk", 0x01456790},
+    {L"GameSessionSettings_thunk", 0x01456830},
     {L"EnableHMD_exec", 0x01192B80},
     {L"EnableHMD_native", 0x0118F1E0},
     {L"GetHMDDeviceName_exec", 0x01192DB0},
@@ -43,7 +43,7 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
 constexpr std::uintptr_t kEngineGlobalRva = 0x03CBBC28;
 constexpr std::uintptr_t kHmdDeviceOffset = 0x0AD8;
 constexpr std::uintptr_t kStereoRenderingDeviceOffset = 0x0AC8;
-constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C93320;
+constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C93398;
 constexpr std::uintptr_t kGeneralProjectSettingsRuntimeRegionRva = 0x01455000;
 constexpr std::size_t kGeneralProjectSettingsRuntimeRegionSize = 0x4000;
 
@@ -205,6 +205,7 @@ void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
                  offset, reinterpret_cast<void*>(candidate), reinterpret_cast<void*>(first_qword),
                  static_cast<unsigned>(start_in_vr), static_cast<unsigned>(start_from_vr_hangar),
                  static_cast<unsigned>(start_in_ar));
+        LogBytes(file, L"general_project_settings object+0x100", reinterpret_cast<const std::uint8_t*>(candidate + 0x100), 0x18);
     }
 }
 
