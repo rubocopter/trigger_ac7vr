@@ -16,6 +16,22 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
+// Throwaway ABI probe objects. These are only installed into the engine slots
+// for the duration of TestFakeHmdInterfaces(), then the original pointers are
+// restored immediately.
+struct FakeInterface {
+    void** vtable;
+};
+
+std::array<void*, 32> g_fake_hmd_vtable{};
+std::array<void*, 16> g_fake_device_vtable{};
+std::array<void*, 8> g_fake_stereo_vtable{};
+FakeInterface g_fake_hmd{g_fake_hmd_vtable.data()};
+FakeInterface g_fake_device{g_fake_device_vtable.data()};
+FakeInterface g_fake_stereo{g_fake_stereo_vtable.data()};
+bool g_fake_hmd_enabled = false;
+bool g_fake_stereo_enabled = false;
+
 constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
     {L"ToggleVRTestMissionMenu_command", 0x00916380},
     {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
@@ -43,9 +59,47 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
 constexpr std::uintptr_t kEngineGlobalRva = 0x03CBBC28;
 constexpr std::uintptr_t kHmdDeviceOffset = 0x0AD8;
 constexpr std::uintptr_t kStereoRenderingDeviceOffset = 0x0AC8;
+constexpr std::uintptr_t kEnableHmdNativeRva = 0x0118F1E0;
+constexpr std::uintptr_t kIsHmdConnectedNativeRva = 0x01190460;
+constexpr std::uintptr_t kIsHmdEnabledNativeRva = 0x011904C0;
 constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C93398;
 constexpr std::uintptr_t kGeneralProjectSettingsRuntimeRegionRva = 0x01455000;
 constexpr std::size_t kGeneralProjectSettingsRuntimeRegionSize = 0x4000;
+
+void* FakeHmdGetDevice(FakeInterface*) {
+    return &g_fake_device;
+}
+
+bool FakeHmdIsEnabled(FakeInterface*) {
+    return g_fake_hmd_enabled;
+}
+
+bool FakeDeviceIsConnected(FakeInterface*) {
+    return true;
+}
+
+void FakeDeviceEnable(FakeInterface*, bool enabled) {
+    g_fake_hmd_enabled = enabled;
+}
+
+bool FakeStereoEnable(FakeInterface*, bool enabled) {
+    g_fake_stereo_enabled = enabled;
+    return true;
+}
+
+void InitializeFakeInterfaces() {
+    g_fake_hmd_vtable.fill(nullptr);
+    g_fake_device_vtable.fill(nullptr);
+    g_fake_stereo_vtable.fill(nullptr);
+
+    g_fake_hmd_vtable[0xB8 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdGetDevice);
+    g_fake_hmd_vtable[0xD0 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdIsEnabled);
+    g_fake_device_vtable[0x40 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceIsConnected);
+    g_fake_device_vtable[0x58 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceEnable);
+    g_fake_stereo_vtable[0x10 / sizeof(void*)] = reinterpret_cast<void*>(&FakeStereoEnable);
+    g_fake_hmd_enabled = false;
+    g_fake_stereo_enabled = false;
+}
 
 FILE* OpenLog() {
     FILE* file = nullptr;
@@ -133,6 +187,71 @@ void LogHmdState(FILE* file, const std::uint8_t* module) {
              reinterpret_cast<void*>(engine ? engine + kHmdDeviceOffset : 0),
              reinterpret_cast<void*>(hmd_device), reinterpret_cast<void*>(vtable),
              reinterpret_cast<void*>(connected_method), reinterpret_cast<void*>(enabled_method));
+}
+
+void TestFakeHmdInterfaces(FILE* file, std::uint8_t* module) {
+    using IsHmdConnectedFn = bool (*)();
+    using IsHmdEnabledFn = bool (*)();
+    using EnableHmdFn = bool (*)(bool);
+
+    std::uintptr_t engine = 0;
+    SIZE_T read = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), module + kEngineGlobalRva, &engine, sizeof(engine), &read) ||
+        read != sizeof(engine) || engine == 0) {
+        fwprintf(file, L"fake_hmd_probe skipped=engine_unavailable\n");
+        return;
+    }
+
+    auto* stereo_slot = reinterpret_cast<void**>(engine + kStereoRenderingDeviceOffset);
+    auto* hmd_slot = reinterpret_cast<void**>(engine + kHmdDeviceOffset);
+    void* original_stereo = *stereo_slot;
+    void* original_hmd = *hmd_slot;
+    if (original_stereo != nullptr || original_hmd != nullptr) {
+        fwprintf(file, L"fake_hmd_probe skipped=slots_already_populated stereo=%p hmd=%p\n",
+                 original_stereo, original_hmd);
+        return;
+    }
+
+    InitializeFakeInterfaces();
+
+    bool connected = false;
+    bool enabled_before = false;
+    bool enable_true = false;
+    bool enabled_after = false;
+    bool enable_false = false;
+    bool enabled_final = false;
+    DWORD exception_code = 0;
+
+    InterlockedExchangePointer(stereo_slot, &g_fake_stereo);
+    InterlockedExchangePointer(hmd_slot, &g_fake_hmd);
+
+    __try {
+        const auto is_connected = reinterpret_cast<IsHmdConnectedFn>(module + kIsHmdConnectedNativeRva);
+        const auto is_enabled = reinterpret_cast<IsHmdEnabledFn>(module + kIsHmdEnabledNativeRva);
+        const auto enable_hmd = reinterpret_cast<EnableHmdFn>(module + kEnableHmdNativeRva);
+
+        connected = is_connected();
+        enabled_before = is_enabled();
+        enable_true = enable_hmd(true);
+        enabled_after = is_enabled();
+        enable_false = enable_hmd(false);
+        enabled_final = is_enabled();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exception_code = 0xFFFFFFFF;
+    }
+
+    InterlockedExchangePointer(hmd_slot, original_hmd);
+    InterlockedExchangePointer(stereo_slot, original_stereo);
+
+    fwprintf(file,
+             L"fake_hmd_probe connected=%u enabled_before=%u enable_true=%u enabled_after=%u "
+             L"enable_false=%u enabled_final=%u fake_stereo_enabled=%u exception=0x%08X restored_hmd=%u restored_stereo=%u\n",
+             static_cast<unsigned>(connected), static_cast<unsigned>(enabled_before),
+             static_cast<unsigned>(enable_true), static_cast<unsigned>(enabled_after),
+             static_cast<unsigned>(enable_false), static_cast<unsigned>(enabled_final),
+             static_cast<unsigned>(g_fake_stereo_enabled), exception_code,
+             static_cast<unsigned>(*hmd_slot == original_hmd),
+             static_cast<unsigned>(*stereo_slot == original_stereo));
 }
 
 void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
@@ -240,6 +359,8 @@ DWORD WINAPI ProbeThread(void*) {
         }
         DumpRuntimeRegion(file, module);
         LogGeneralProjectSettings(file, module);
+        LogHmdState(file, module);
+        TestFakeHmdInterfaces(file, module);
         LogHmdState(file, module);
     }
 
