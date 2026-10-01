@@ -29,6 +29,8 @@ The PC executable retains substantial game-specific VR code and data, including:
 
 UE4 reflection registration tables also contain native targets for the VR/HMD UFUNCTIONs. The corresponding `.text` bytes in the executable on disk are protected/obfuscated, so useful code inspection must happen against the loaded process image.
 
+The reflected `ToggleVRTestMissionMenu` entry maps to exec thunk RVA `0x0091B9A0`. Runtime probing also resolved the native functions called by the HMD state wrappers at RVAs `0x01190460` (`IsHeadMountedDisplayConnected`) and `0x011904C0` (`IsHeadMountedDisplayEnabled`). These are included in the runtime capture set.
+
 The community UEVR compatibility plugin is also useful evidence: it resolves AC7 objects such as `AcePlayerPawn`, `CameraViewComponent`, and `NimbusPlayerCameraManager`, while its camera enum confirms a retained `VR_CAMERA` entry. Its normal path uses `COCKPIT` rather than AC7's internal `VR_CAMERA`, so the original VR path remains worth probing independently.
 
 ## Runtime probe
@@ -37,7 +39,7 @@ The community UEVR compatibility plugin is also useful evidence: it resolves AC7
 
 The probe does not patch game code. Ten seconds after load it records the main module identity and the first bytes at known VR/HMD reflection targets to:
 
-`%LOCALAPPDATA%\trigger_ac7vr\probe.log`
+`E:\trigger_ac7vr\probe.log`
 
 Build:
 
@@ -59,4 +61,3 @@ The next result decides the route:
 1. If the VR/HMD thunks are readable/decrypted in memory, recover their runtime behavior and find the `IsVRMode` / `ToggleVRTestMissionMenu` gate.
 2. If AC7 can enter its retained VR menu/camera path without a real HMD backend, add the smallest fake XR device needed to exercise that path.
 3. Only after that gate works, prototype an actual OpenXR tracking/stereo backend.
-

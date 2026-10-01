@@ -15,7 +15,8 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 7> kProbeRvas{{
+constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 10> kProbeRvas{{
+    {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
     {L"IsVRGameMode_exec", 0x00924560},
     {L"IsVRMode_exec", 0x00924590},
     {L"IsVRUIMode_exec", 0x009245C0},
@@ -23,20 +24,13 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 7> kProbeRvas{{
     {L"GetHMDDeviceName_exec", 0x01192DB0},
     {L"IsHMDConnected_exec", 0x011937B0},
     {L"IsHMDEnabled_exec", 0x011937E0},
+    {L"IsHMDConnected_native", 0x01190460},
+    {L"IsHMDEnabled_native", 0x011904C0},
 }};
 
 FILE* OpenLog() {
-    wchar_t local_appdata[MAX_PATH]{};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local_appdata, MAX_PATH)) {
-        return nullptr;
-    }
-
-    std::wstring dir = std::wstring(local_appdata) + L"\\trigger_ac7vr";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    std::wstring path = dir + L"\\probe.log";
-
     FILE* file = nullptr;
-    _wfopen_s(&file, path.c_str(), L"a, ccs=UTF-8");
+    _wfopen_s(&file, L"E:\\trigger_ac7vr\\probe.log", L"a, ccs=UTF-8");
     return file;
 }
 
