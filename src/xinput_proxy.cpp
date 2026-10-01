@@ -126,15 +126,16 @@ void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
     }
 
     std::array<std::uint8_t, 0x220> class_bytes{};
+    SIZE_T class_read = 0;
     if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(klass),
-                           class_bytes.data(), class_bytes.size(), &read)) {
+                           class_bytes.data(), class_bytes.size(), &class_read)) {
         fwprintf(file, L"general_project_settings class_dump=<read failed:%lu>\n", GetLastError());
         return;
     }
 
     const auto module_begin = reinterpret_cast<std::uintptr_t>(module);
     const auto module_end = module_begin + 0x0441A000;
-    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= read; offset += sizeof(std::uintptr_t)) {
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= class_read; offset += sizeof(std::uintptr_t)) {
         std::uintptr_t candidate = 0;
         memcpy(&candidate, class_bytes.data() + offset, sizeof(candidate));
         if (!candidate || (candidate >= module_begin && candidate < module_end)) {
@@ -142,8 +143,10 @@ void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
         }
 
         std::uintptr_t first_qword = 0;
+        SIZE_T candidate_read = 0;
         if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate),
-                               &first_qword, sizeof(first_qword), &read) || read != sizeof(first_qword)) {
+                               &first_qword, sizeof(first_qword), &candidate_read) ||
+            candidate_read != sizeof(first_qword)) {
             continue;
         }
         if (first_qword < module_begin || first_qword >= module_end) {

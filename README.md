@@ -31,9 +31,9 @@ UE4 reflection registration tables also contain native targets for the VR/HMD UF
 
 The reflected `ToggleVRTestMissionMenu` entry maps to RVA `0x0091B9A0`. Runtime disassembly shows this target is a lazy UE4 reflected-function constructor rather than the gameplay implementation. A separate command/debug registration for the same name references RVA `0x00916380`, which is now probed as the stronger candidate for the actual toggle callback. Runtime probing also resolved the native functions called by the HMD state wrappers at RVAs `0x01190460` (`IsHeadMountedDisplayConnected`) and `0x011904C0` (`IsHeadMountedDisplayEnabled`).
 
-The HMD natives dispatch through an engine-owned interface pointer: both load the same engine global at RVA `0x03CBBC28`, then the HMD device/interface at offset `+0xAD8`. `IsHeadMountedDisplayConnected` calls virtual slot `+0xB8`; `IsHeadMountedDisplayEnabled` calls virtual slot `+0xD0` and returns false when the interface is absent or reports disabled. The probe now records this runtime pointer chain and its method addresses directly.
+The HMD natives dispatch through an engine-owned interface pointer: both load the same engine global at RVA `0x03CBBC28`, then the HMD device/interface at offset `+0xAD8`. `IsHeadMountedDisplayConnected` calls virtual slot `+0xB8`; `IsHeadMountedDisplayEnabled` calls virtual slot `+0xD0` and returns false when the interface is absent or reports disabled. `EnableHMD` also uses the engine stereo rendering interface at `+0xAC8`, calling virtual slot `+0x10` with the requested enabled state.
 
-Runtime probing confirms that this HMD slot is null on the PC build at menu time. The retained startup settings are also real generated UE4 properties, with SetBit helpers that write full bytes rather than packed bit masks:
+Runtime probing confirms that both `engine + 0xAD8` (HMD) and `engine + 0xAC8` (stereo rendering device) are null on the PC build at menu/aircraft-viewer time. The retained startup settings are also real generated UE4 properties, with SetBit helpers that write full bytes rather than packed bit masks:
 
 - `bStartInVR` -> `UGeneralProjectSettings + 0x10B`
 - `bStartFromVRHangar` -> `UGeneralProjectSettings + 0x10C`
@@ -48,7 +48,7 @@ The community UEVR compatibility plugin is also useful evidence: it resolves AC7
 
 `src/xinput_proxy.cpp` builds a diagnostic `xinput1_3.dll` proxy. AC7 imports only XInput ordinals 2 and 3 (`XInputGetState` and `XInputSetState`), both of which are forwarded to the system DLL.
 
-The probe does not patch game code. Ten seconds after load it records the main module identity, code bytes at known VR/HMD targets, and the current HMD interface pointer chain to:
+The probe does not patch game code. Ten seconds after load it records the main module identity, code bytes at known VR/HMD targets, the HMD/stereo interface pointers, and the runtime `GeneralProjectSettings` state used to verify the startup flags to:
 
 `E:\trigger_ac7vr\probe.log`
 
@@ -69,6 +69,6 @@ For the first runtime test, place that DLL next to `Ace7Game.exe`, start the gam
 
 The next result decides the route:
 
-1. Test the retained `UGeneralProjectSettings` startup route with `bStartInVR=True` and `bStartFromVRHangar=True` in the user's `Game.ini`.
-2. Observe whether AC7 enters its retained VR menu/camera path even though the PC HMD interface is currently null.
-3. If that route is live and the HMD interface is the remaining blocker, prototype the smallest UE4 HMD interface needed to satisfy the game before adding an OpenXR renderer backend.
+1. Read the runtime `UGeneralProjectSettings` default object and verify whether the current `Game.ini` produces `bStartInVR=1`, `bStartFromVRHangar=1`, and `bStartInAR=0`.
+2. If the flags are loaded, treat the missing HMD/stereo interfaces as the next blocker and map the minimum virtual interface required to satisfy AC7's retained VR checks.
+3. Only after AC7's retained VR mode can be entered should the spike proceed to an OpenXR rendering backend.
