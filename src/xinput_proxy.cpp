@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -15,7 +16,7 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 18> kProbeRvas{{
+constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
     {L"ToggleVRTestMissionMenu_command", 0x00916380},
     {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
     {L"IsVRGameMode_exec", 0x00924560},
@@ -26,6 +27,9 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 18> kProbeRvas{{
     {L"bStartFromVRHangar_SetBit", 0x01456B80},
     {L"bStartInAR_SetBit", 0x01456BC0},
     {L"GeneralProjectSettings_candidate", 0x01456BD0},
+    {L"GeneralProjectSettings_thunk_0", 0x01456650},
+    {L"GeneralProjectSettings_thunk_1", 0x01456790},
+    {L"GeneralProjectSettings_thunk_2", 0x01456830},
     {L"EnableHMD_exec", 0x01192B80},
     {L"EnableHMD_native", 0x0118F1E0},
     {L"GetHMDDeviceName_exec", 0x01192DB0},
@@ -38,6 +42,8 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 18> kProbeRvas{{
 
 constexpr std::uintptr_t kEngineGlobalRva = 0x03CBBC28;
 constexpr std::uintptr_t kHmdDeviceOffset = 0x0AD8;
+constexpr std::uintptr_t kStereoRenderingDeviceOffset = 0x0AC8;
+constexpr std::uintptr_t kGeneralProjectSettingsClassGlobalRva = 0x03C932F8;
 
 FILE* OpenLog() {
     FILE* file = nullptr;
@@ -72,7 +78,10 @@ void LogHmdState(FILE* file, const std::uint8_t* module) {
     }
 
     std::uintptr_t hmd_device = 0;
+    std::uintptr_t stereo_device = 0;
     if (engine != 0) {
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(engine + kStereoRenderingDeviceOffset),
+                          &stereo_device, sizeof(stereo_device), &read);
         ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(engine + kHmdDeviceOffset),
                           &hmd_device, sizeof(hmd_device), &read);
     }
@@ -93,10 +102,71 @@ void LogHmdState(FILE* file, const std::uint8_t* module) {
     }
 
     fwprintf(file,
-             L"hmd_state engine=%p hmd_slot=%p hmd_device=%p vtable=%p method_b8=%p method_d0=%p\n",
-             reinterpret_cast<void*>(engine), reinterpret_cast<void*>(engine ? engine + kHmdDeviceOffset : 0),
+             L"hmd_state engine=%p stereo_slot=%p stereo_device=%p hmd_slot=%p hmd_device=%p vtable=%p method_b8=%p method_d0=%p\n",
+             reinterpret_cast<void*>(engine), reinterpret_cast<void*>(engine ? engine + kStereoRenderingDeviceOffset : 0),
+             reinterpret_cast<void*>(stereo_device),
+             reinterpret_cast<void*>(engine ? engine + kHmdDeviceOffset : 0),
              reinterpret_cast<void*>(hmd_device), reinterpret_cast<void*>(vtable),
              reinterpret_cast<void*>(connected_method), reinterpret_cast<void*>(enabled_method));
+}
+
+void LogGeneralProjectSettings(FILE* file, const std::uint8_t* module) {
+    SIZE_T read = 0;
+    std::uintptr_t klass = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), module + kGeneralProjectSettingsClassGlobalRva,
+                           &klass, sizeof(klass), &read) || read != sizeof(klass)) {
+        fwprintf(file, L"general_project_settings class=<read failed:%lu>\n", GetLastError());
+        return;
+    }
+
+    fwprintf(file, L"general_project_settings class_global=%p class=%p\n",
+             module + kGeneralProjectSettingsClassGlobalRva, reinterpret_cast<void*>(klass));
+    if (!klass) {
+        return;
+    }
+
+    std::array<std::uint8_t, 0x220> class_bytes{};
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(klass),
+                           class_bytes.data(), class_bytes.size(), &read)) {
+        fwprintf(file, L"general_project_settings class_dump=<read failed:%lu>\n", GetLastError());
+        return;
+    }
+
+    const auto module_begin = reinterpret_cast<std::uintptr_t>(module);
+    const auto module_end = module_begin + 0x0441A000;
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= read; offset += sizeof(std::uintptr_t)) {
+        std::uintptr_t candidate = 0;
+        memcpy(&candidate, class_bytes.data() + offset, sizeof(candidate));
+        if (!candidate || (candidate >= module_begin && candidate < module_end)) {
+            continue;
+        }
+
+        std::uintptr_t first_qword = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate),
+                               &first_qword, sizeof(first_qword), &read) || read != sizeof(first_qword)) {
+            continue;
+        }
+        if (first_qword < module_begin || first_qword >= module_end) {
+            continue;
+        }
+
+        std::uint8_t start_in_vr = 0xFF;
+        std::uint8_t start_from_vr_hangar = 0xFF;
+        std::uint8_t start_in_ar = 0xFF;
+        SIZE_T byte_read = 0;
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate + 0x10B),
+                          &start_in_vr, sizeof(start_in_vr), &byte_read);
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate + 0x10C),
+                          &start_from_vr_hangar, sizeof(start_from_vr_hangar), &byte_read);
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(candidate + 0x10D),
+                          &start_in_ar, sizeof(start_in_ar), &byte_read);
+
+        fwprintf(file,
+                 L"general_project_settings candidate class_off=0x%zX object=%p vtable=%p bStartInVR=%u bStartFromVRHangar=%u bStartInAR=%u\n",
+                 offset, reinterpret_cast<void*>(candidate), reinterpret_cast<void*>(first_qword),
+                 static_cast<unsigned>(start_in_vr), static_cast<unsigned>(start_from_vr_hangar),
+                 static_cast<unsigned>(start_in_ar));
+    }
 }
 
 DWORD WINAPI ProbeThread(void*) {
@@ -128,6 +198,7 @@ DWORD WINAPI ProbeThread(void*) {
         for (const auto& [label, rva] : kProbeRvas) {
             LogBytes(file, label, module + rva, 160);
         }
+        LogGeneralProjectSettings(file, module);
         LogHmdState(file, module);
     }
 
