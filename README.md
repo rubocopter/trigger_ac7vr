@@ -75,4 +75,10 @@ For the persistent-interface test, place that DLL next to `Ace7Game.exe`, start 
 
 The configuration and minimal-ABI gates are closed: `bStartInVR` reaches the real `UGeneralProjectSettings` default object, and the reconstructed interfaces satisfy the known `IsHMDConnected`, `IsHMDEnabled`, `EnableHMD`, device-enable, and stereo-enable calls.
 
-The next run must establish which additional virtual methods AC7/UE4 touches when those interfaces remain installed and whether the retained VR path advances. Implement only the methods demonstrated by that trace. An OpenXR rendering backend remains out of scope until the retained VR route can stay active through this interface layer.
+The persistent test entered XR methods but crashed at RVA `0x009B9939` while releasing an uninitialized shared-pointer controller. The immediate diagnostic captured the same result-buffer address for XR slot 22 and the shared-pointer destructor. UE4 4.18 identifies slot 22 as `GetXRCamera`, which returns a 16-byte `TSharedPtr` through a hidden result buffer. Returning scalar zero did not construct that result.
+
+The probe now constructs an empty camera shared pointer and returns the buffer. An offline ABI regression test failed against the old stub and passes with this implementation, including checks for both pointer words and buffer boundaries. Run it with `ctest --test-dir build -C Release --output-on-failure` after building `fake_interface_abi_test`.
+
+The outer interface is `IXRTrackingSystem`: slot 23 is `GetHMDDevice`; slot 26 is `IsHeadTrackingAllowed` (used by AC7's `IsHMDEnabled` wrapper), rather than the underlying HMD's enabled method. Slot 27 is `OnBeginPlay` and slot 29 is `OnStartGameFrame`. The underlying HMD's slot 9 is `IsHMDEnabled`, slot 12 is `GetHMDDeviceType`, slot 13 is `GetHMDMonitorInfo`, slot 35 is `UpdatePostProcessSettings`, and slot 36 is `GetDistortionTextureLeft`. Device slot 52 remains unidentified. Reference: [UE4 4.18 vtable definitions](https://github.com/Aeyth8/UESDK/blob/main/src/sdk/vtables/IXRTrackingSystemVTables.hpp#L2232).
+
+The next manual launch must establish whether AC7 can proceed beyond the shared-pointer failure. Returning an empty camera does not implement head tracking or headset rendering. An OpenXR rendering backend remains out of scope until the retained VR route can stay active through this interface layer.

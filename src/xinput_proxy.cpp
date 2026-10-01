@@ -26,6 +26,14 @@ struct FakeInterface {
     void** vtable;
 };
 
+// UE4 4.18 TSharedPtr<IXRCamera, ThreadSafe> returned via an x64 hidden
+// result buffer: object pointer followed by the reference-controller pointer.
+struct FakeSharedPointerResult {
+    void* object;
+    void* reference_controller;
+};
+static_assert(sizeof(FakeSharedPointerResult) == 16);
+
 enum class FakeInterfaceKind : std::uint32_t {
     Hmd = 1,
     Device = 2,
@@ -33,7 +41,11 @@ enum class FakeInterfaceKind : std::uint32_t {
 };
 
 constexpr std::size_t kFakeVtableSlots = 128;
+#ifdef TRIGGER_AC7VR_ABI_TEST
+constexpr wchar_t kImmediateSlotLogPath[] = L"NUL";
+#else
 constexpr wchar_t kImmediateSlotLogPath[] = L"E:\\trigger_ac7vr\\evidence\\persistent_slots.log";
+#endif
 
 std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_hmd_slot_hits{};
 std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_device_slot_hits{};
@@ -180,7 +192,19 @@ void* FakeHmdGetDevice(FakeInterface*) {
     return &g_fake_device;
 }
 
-bool FakeHmdIsEnabled(FakeInterface*) {
+FakeSharedPointerResult* FakeXrGetCamera(FakeInterface*, FakeSharedPointerResult* out,
+                                        std::int32_t) {
+    RecordSlot(FakeInterfaceKind::Hmd, 22, false);
+    // A scalar zero return leaves the caller's shared-pointer result
+    // uninitialized. Its destructor then decrements a garbage controller.
+    // This probe has no camera yet, so construct a valid empty shared pointer.
+    if (out) {
+        *out = {nullptr, nullptr};
+    }
+    return out;
+}
+
+bool FakeXrIsHeadTrackingAllowed(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Hmd, 0xD0 / sizeof(void*), false);
     return g_fake_hmd_enabled;
 }
@@ -218,8 +242,9 @@ void InitializeFakeInterfaces() {
     g_fake_stereo_vtable = MakeStubVtable<FakeInterfaceKind::Stereo>(std::make_index_sequence<kFakeVtableSlots>{});
 
     g_fake_hmd_vtable[0] = reinterpret_cast<void*>(&FakeHmdGetDeviceName);
+    g_fake_hmd_vtable[22] = reinterpret_cast<void*>(&FakeXrGetCamera);
     g_fake_hmd_vtable[0xB8 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdGetDevice);
-    g_fake_hmd_vtable[0xD0 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdIsEnabled);
+    g_fake_hmd_vtable[0xD0 / sizeof(void*)] = reinterpret_cast<void*>(&FakeXrIsHeadTrackingAllowed);
     g_fake_device_vtable[0x40 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceIsConnected);
     g_fake_device_vtable[0x58 / sizeof(void*)] = reinterpret_cast<void*>(&FakeDeviceEnable);
     g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
