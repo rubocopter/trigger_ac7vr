@@ -42,7 +42,18 @@ def main() -> int:
         rva = value - image_base
         for name, _raw, _raw_size, section_rva, span in sections:
             if section_rva <= rva < section_rva + span:
-                return f"{name} rva={rva:#x}"
+                description = f"{name} rva={rva:#x}"
+                if name == ".rdata":
+                    for _n, raw, raw_size, srva, _span in sections:
+                        if srva <= rva < srva + raw_size:
+                            offset = raw + (rva - srva)
+                            end = data.find(b"\0", offset, min(offset + 160, len(data)))
+                            if end > offset:
+                                candidate = data[offset:end]
+                                if all(0x20 <= byte < 0x7F for byte in candidate):
+                                    description += f" string={candidate.decode('ascii')!r}"
+                            break
+                return description
         return "image"
 
     needle = args.symbol.encode("ascii") + b"\0"

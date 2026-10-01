@@ -29,7 +29,9 @@ The PC executable retains substantial game-specific VR code and data, including:
 
 UE4 reflection registration tables also contain native targets for the VR/HMD UFUNCTIONs. The corresponding `.text` bytes in the executable on disk are protected/obfuscated, so useful code inspection must happen against the loaded process image.
 
-The reflected `ToggleVRTestMissionMenu` entry maps to exec thunk RVA `0x0091B9A0`. Runtime probing also resolved the native functions called by the HMD state wrappers at RVAs `0x01190460` (`IsHeadMountedDisplayConnected`) and `0x011904C0` (`IsHeadMountedDisplayEnabled`). These are included in the runtime capture set.
+The reflected `ToggleVRTestMissionMenu` entry maps to RVA `0x0091B9A0`. Runtime disassembly shows this target is a lazy UE4 reflected-function constructor rather than the gameplay implementation. A separate command/debug registration for the same name references RVA `0x00916380`, which is now probed as the stronger candidate for the actual toggle callback. Runtime probing also resolved the native functions called by the HMD state wrappers at RVAs `0x01190460` (`IsHeadMountedDisplayConnected`) and `0x011904C0` (`IsHeadMountedDisplayEnabled`).
+
+The HMD natives dispatch through an engine-owned interface pointer: both load the same engine global at RVA `0x03CBBC28`, then the HMD device/interface at offset `+0xAD8`. `IsHeadMountedDisplayConnected` calls virtual slot `+0xB8`; `IsHeadMountedDisplayEnabled` calls virtual slot `+0xD0` and returns false when the interface is absent or reports disabled. The probe now records this runtime pointer chain and its method addresses directly.
 
 The community UEVR compatibility plugin is also useful evidence: it resolves AC7 objects such as `AcePlayerPawn`, `CameraViewComponent`, and `NimbusPlayerCameraManager`, while its camera enum confirms a retained `VR_CAMERA` entry. Its normal path uses `COCKPIT` rather than AC7's internal `VR_CAMERA`, so the original VR path remains worth probing independently.
 
@@ -37,7 +39,7 @@ The community UEVR compatibility plugin is also useful evidence: it resolves AC7
 
 `src/xinput_proxy.cpp` builds a diagnostic `xinput1_3.dll` proxy. AC7 imports only XInput ordinals 2 and 3 (`XInputGetState` and `XInputSetState`), both of which are forwarded to the system DLL.
 
-The probe does not patch game code. Ten seconds after load it records the main module identity and the first bytes at known VR/HMD reflection targets to:
+The probe does not patch game code. Ten seconds after load it records the main module identity, code bytes at known VR/HMD targets, and the current HMD interface pointer chain to:
 
 `E:\trigger_ac7vr\probe.log`
 
@@ -58,6 +60,6 @@ For the first runtime test, place that DLL next to `Ace7Game.exe`, start the gam
 
 The next result decides the route:
 
-1. If the VR/HMD thunks are readable/decrypted in memory, recover their runtime behavior and find the `IsVRMode` / `ToggleVRTestMissionMenu` gate.
-2. If AC7 can enter its retained VR menu/camera path without a real HMD backend, add the smallest fake XR device needed to exercise that path.
-3. Only after that gate works, prototype an actual OpenXR tracking/stereo backend.
+1. Confirm whether the engine's HMD interface at `engine + 0xAD8` is null on the PC build and identify any registered backend when present.
+2. Resolve the actual native implementation behind `ToggleVRTestMissionMenu` and test AC7's retained VR menu/camera path.
+3. If the retained path is usable and blocked only by the HMD interface, prototype the smallest PC XR/OpenXR backend needed to satisfy it.

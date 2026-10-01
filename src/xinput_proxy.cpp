@@ -15,7 +15,8 @@ HMODULE g_real_xinput = nullptr;
 XInputGetStateFn g_real_get_state = nullptr;
 XInputSetStateFn g_real_set_state = nullptr;
 
-constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 10> kProbeRvas{{
+constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 11> kProbeRvas{{
+    {L"ToggleVRTestMissionMenu_command", 0x00916380},
     {L"ToggleVRTestMissionMenu_exec", 0x0091B9A0},
     {L"IsVRGameMode_exec", 0x00924560},
     {L"IsVRMode_exec", 0x00924590},
@@ -27,6 +28,9 @@ constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 10> kProbeRvas{{
     {L"IsHMDConnected_native", 0x01190460},
     {L"IsHMDEnabled_native", 0x011904C0},
 }};
+
+constexpr std::uintptr_t kEngineGlobalRva = 0x03CBBC28;
+constexpr std::uintptr_t kHmdDeviceOffset = 0x0AD8;
 
 FILE* OpenLog() {
     FILE* file = nullptr;
@@ -49,6 +53,43 @@ void LogBytes(FILE* file, const wchar_t* label, const std::uint8_t* address, std
         fwprintf(file, L"<ReadProcessMemory failed: %lu>", GetLastError());
     }
     fwprintf(file, L"\n");
+}
+
+void LogHmdState(FILE* file, const std::uint8_t* module) {
+    std::uintptr_t engine = 0;
+    SIZE_T read = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), module + kEngineGlobalRva, &engine, sizeof(engine), &read) ||
+        read != sizeof(engine)) {
+        fwprintf(file, L"hmd_state engine=<read failed:%lu>\n", GetLastError());
+        return;
+    }
+
+    std::uintptr_t hmd_device = 0;
+    if (engine != 0) {
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(engine + kHmdDeviceOffset),
+                          &hmd_device, sizeof(hmd_device), &read);
+    }
+
+    std::uintptr_t vtable = 0;
+    if (hmd_device != 0) {
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(hmd_device),
+                          &vtable, sizeof(vtable), &read);
+    }
+
+    std::uintptr_t connected_method = 0;
+    std::uintptr_t enabled_method = 0;
+    if (vtable != 0) {
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(vtable + 0xB8),
+                          &connected_method, sizeof(connected_method), &read);
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(vtable + 0xD0),
+                          &enabled_method, sizeof(enabled_method), &read);
+    }
+
+    fwprintf(file,
+             L"hmd_state engine=%p hmd_slot=%p hmd_device=%p vtable=%p method_b8=%p method_d0=%p\n",
+             reinterpret_cast<void*>(engine), reinterpret_cast<void*>(engine ? engine + kHmdDeviceOffset : 0),
+             reinterpret_cast<void*>(hmd_device), reinterpret_cast<void*>(vtable),
+             reinterpret_cast<void*>(connected_method), reinterpret_cast<void*>(enabled_method));
 }
 
 DWORD WINAPI ProbeThread(void*) {
@@ -78,8 +119,9 @@ DWORD WINAPI ProbeThread(void*) {
                  nt->OptionalHeader.AddressOfEntryPoint);
 
         for (const auto& [label, rva] : kProbeRvas) {
-            LogBytes(file, label, module + rva, 48);
+            LogBytes(file, label, module + rva, 64);
         }
+        LogHmdState(file, module);
     }
 
     fflush(file);
