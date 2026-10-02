@@ -3,3 +3,4 @@ build/
 __pycache__/
 probe.log
 enable_stereo_probe.flag
+enable_runtime_capture.flag

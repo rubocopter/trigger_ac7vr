@@ -11,6 +11,8 @@
 #include <string>
 #include <utility>
 
+#include "graphics_bridge.h"
+
 namespace {
 using XInputGetStateFn = decltype(&XInputGetState);
 using XInputSetStateFn = decltype(&XInputSetState);
@@ -37,6 +39,10 @@ struct FakeSharedPointerResult {
 static_assert(sizeof(FakeSharedPointerResult) == 16);
 
 struct FakeVector2 { float x, y; };
+struct FakeVector3 { float x, y, z; };
+struct FakeQuat { float x, y, z, w; };
+static_assert(sizeof(FakeVector3) == 12);
+static_assert(sizeof(FakeQuat) == 16);
 
 enum class FakeInterfaceKind : std::uint32_t {
     Hmd = 1,
@@ -54,8 +60,8 @@ constexpr wchar_t kImmediateSlotLogPath[] = L"E:\\trigger_ac7vr\\evidence\\persi
 std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_hmd_slot_hits{};
 std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_device_slot_hits{};
 std::array<std::atomic<std::uint32_t>, kFakeVtableSlots> g_stereo_slot_hits{};
-std::atomic<std::uint32_t> g_last_interface{0};
-std::atomic<std::uint32_t> g_last_slot{0};
+thread_local std::uint32_t g_last_interface = 0;
+thread_local std::uint32_t g_last_slot = 0;
 
 const char* InterfaceName(FakeInterfaceKind kind) {
     switch (kind) {
@@ -75,7 +81,7 @@ std::array<std::atomic<std::uint32_t>, kFakeVtableSlots>& SlotHits(FakeInterface
     return g_hmd_slot_hits;
 }
 
-void AppendImmediateDiagnostic(const char* text, DWORD length) {
+void AppendImmediateDiagnostic(const char* text, DWORD length, bool durable = true) {
     HANDLE file = CreateFileW(kImmediateSlotLogPath, FILE_APPEND_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -84,7 +90,7 @@ void AppendImmediateDiagnostic(const char* text, DWORD length) {
     }
     DWORD written = 0;
     WriteFile(file, text, length, &written, nullptr);
-    FlushFileBuffers(file);
+    if (durable) FlushFileBuffers(file);
     CloseHandle(file);
 }
 
@@ -138,8 +144,8 @@ bool RecordSlot(FakeInterfaceKind kind, std::size_t slot, bool unknown) {
 
     auto& counter = SlotHits(kind)[slot];
     const auto previous = counter.fetch_add(1, std::memory_order_relaxed);
-    g_last_interface.store(static_cast<std::uint32_t>(kind), std::memory_order_relaxed);
-    g_last_slot.store(static_cast<std::uint32_t>(slot), std::memory_order_relaxed);
+    g_last_interface = static_cast<std::uint32_t>(kind);
+    g_last_slot = static_cast<std::uint32_t>(slot);
 
     // The first hit to an unknown slot is persisted synchronously. If the
     // neutral return value immediately leads to an access violation, this line
@@ -206,6 +212,10 @@ FakeInterface g_fake_stereo{g_fake_stereo_vtable.data()};
 std::atomic<bool> g_fake_hmd_enabled{false};
 std::atomic<bool> g_fake_stereo_enabled{false};
 std::atomic<float> g_fake_eye_aspect{1.0f};
+std::atomic<float> g_fake_world_to_meters{0.0f};
+std::atomic<std::uint32_t> g_pose_call_count{0};
+std::atomic<std::uint32_t> g_stereo_view_call_count{0};
+std::atomic<bool> g_pose_first_valid_logged{false};
 PVOID g_vectored_exception_handler = nullptr;
 
 constexpr std::array<std::pair<const wchar_t*, std::uintptr_t>, 21> kProbeRvas{{
@@ -253,6 +263,86 @@ void* FakeHmdGetDeviceName(FakeInterface*, void* out_name) {
 void* FakeHmdGetDevice(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Hmd, 0xB8 / sizeof(void*), false);
     return &g_fake_device;
+}
+
+bool ApplyBridgeHeadPose(const ac7vr::BridgeHeadPose& pose, float world_to_meters,
+                         FakeQuat& orientation, FakeVector3& position) {
+    orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    position = {0.0f, 0.0f, 0.0f};
+
+    bool valid = false;
+    if (pose.orientation_valid) {
+        orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+        valid = true;
+    }
+    if (pose.position_valid && std::isfinite(world_to_meters) && world_to_meters > 0.0f) {
+        position = {
+            pose.position_meters.x * world_to_meters,
+            pose.position_meters.y * world_to_meters,
+            pose.position_meters.z * world_to_meters,
+        };
+        valid = true;
+    }
+    return valid;
+}
+
+bool ShouldLogPoseDiagnostic(std::uint32_t call_count, bool bridge_pose_available,
+                             bool first_valid_already_logged) {
+    if (!bridge_pose_available) {
+        return false;
+    }
+    return !first_valid_already_logged || (call_count % 2000u) == 0;
+}
+
+__declspec(noinline)
+bool FakeXrGetCurrentPose(FakeInterface*, std::int32_t, FakeQuat& orientation,
+                          FakeVector3& position) {
+    RecordSlot(FakeInterfaceKind::Hmd, 9, false);
+    const auto call_count = g_pose_call_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    position = {0.0f, 0.0f, 0.0f};
+    ac7vr::BridgeHeadPose pose{};
+    const bool bridge_pose_available = ac7vr::TryGetLatestOpenXrHeadPose(pose);
+    if (!bridge_pose_available) return false;
+
+    const float world_to_meters = g_fake_world_to_meters.load(std::memory_order_relaxed);
+    const bool applied = ApplyBridgeHeadPose(pose, world_to_meters, orientation, position);
+    const bool first_valid_already_logged =
+        g_pose_first_valid_logged.exchange(true, std::memory_order_relaxed);
+    if (ShouldLogPoseDiagnostic(call_count, bridge_pose_available, first_valid_already_logged)) {
+        const auto caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const auto caller_rva = module && caller >= module ? caller - module : 0;
+        char line[768]{};
+        const int length = _snprintf_s(
+            line, sizeof(line), _TRUNCATE,
+            "pose_slot9 call=%u caller=%p caller_rva=0x%llX "
+            "raw_valid_o=%u raw_valid_p=%u raw_q=(%.6f,%.6f,%.6f,%.6f) "
+            "raw_p_m=(%.6f,%.6f,%.6f) world_to_meters=%.6f applied=%u "
+            "out_q=(%.6f,%.6f,%.6f,%.6f) out_p=(%.6f,%.6f,%.6f)\r\n",
+            static_cast<unsigned>(call_count), reinterpret_cast<void*>(caller),
+            static_cast<unsigned long long>(caller_rva),
+            static_cast<unsigned>(pose.orientation_valid),
+            static_cast<unsigned>(pose.position_valid),
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+            pose.position_meters.x, pose.position_meters.y, pose.position_meters.z,
+            world_to_meters, static_cast<unsigned>(applied),
+            orientation.x, orientation.y, orientation.z, orientation.w,
+            position.x, position.y, position.z);
+        if (length > 0) {
+            AppendImmediateDiagnostic(line, static_cast<DWORD>(length), false);
+        }
+    }
+    return applied;
+}
+
+FakeVector3* FakeXrGetAudioListenerOffset(FakeInterface*, FakeVector3* out,
+                                          std::int32_t) {
+    RecordSlot(FakeInterfaceKind::Hmd, 14, false);
+    if (out) {
+        *out = {0.0f, 0.0f, 0.0f};
+    }
+    return out;
 }
 
 FakeSharedPointerResult* FakeXrGetCamera(FakeInterface*, FakeSharedPointerResult* out,
@@ -347,10 +437,27 @@ void* FakeDeviceGetDistortionTextureLeft(FakeInterface*) {
     return nullptr;
 }
 
-FakeVector2* FakeDeviceGetTextureScaleLeft(FakeInterface*, FakeVector2* out) {
+void FakeDeviceSlot37ContextHook(FakeInterface*, void*, std::int32_t) {
+    // AC7 caller RVA 0x00EF9EFA passes a caller-owned context in RDX and a
+    // view/pass-like integer in R8D, then ignores the return value. Until the
+    // custom engine semantics are known, preserving that context is the only
+    // behavior established by the captured callsite.
+    RecordSlot(FakeInterfaceKind::Device, 37, false);
+}
+
+void FakeDeviceSlot41BufferHook(FakeInterface*, void*) {
+    // The UE4.18 layout names this slot GetTextureScaleRight, but AC7's only
+    // localized caller passes &object+0xC80 and ignores RAX. The last successful
+    // run used the generic stub, which left that storage untouched. Preserve it
+    // until the value semantics are established from runtime evidence.
+    RecordSlot(FakeInterfaceKind::Device, 41, false);
+}
+
+void FakeDeviceSlot40ObjectHook(FakeInterface*, void*) {
+    // AC7 caller RVA 0x01790EAB loads RDX explicitly from [this+0x78]
+    // and ignores the return value. Treating this as stock UE4.18
+    // GetTextureScaleLeft() corrupts the first 8 bytes of that object.
     RecordSlot(FakeInterfaceKind::Device, 40, false);
-    if (out) *out = {0.0f, 0.0f};
-    return out;
 }
 
 void FakeDeviceStartupHook(FakeInterface*) {
@@ -376,10 +483,59 @@ bool FakeStereoEnable(FakeInterface*, bool enabled) {
     return enabled;
 }
 
-struct FakeVector3 { float x, y, z; };
 struct FakeRotator { float pitch, yaw, roll; };
 struct FakeMatrix { float m[4][4]; };
 static_assert(sizeof(FakeMatrix) == 64);
+
+float NormalizeDegrees(float angle) {
+    if (!std::isfinite(angle)) return 0.0f;
+    angle = fmodf(angle, 360.0f);
+    if (angle > 180.0f) angle -= 360.0f;
+    if (angle < -180.0f) angle += 360.0f;
+    return angle;
+}
+
+FakeRotator QuaternionToUnrealRotator(const FakeQuat& q) {
+    // Matches the FQuat::Rotator convention used by AC7's native helper at
+    // RVA 0x00A08C30. The bridge quaternion is already in Unreal axes.
+    constexpr float kSingularityThreshold = 0.4999995f;
+    constexpr float kRadiansToDegrees = 57.29577951308232f;
+    const float singularity_test = q.z * q.x - q.w * q.y;
+    const float yaw_y = 2.0f * (q.w * q.z + q.x * q.y);
+    const float yaw_x = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
+
+    FakeRotator out{};
+    if (singularity_test < -kSingularityThreshold) {
+        out.pitch = -90.0f;
+        out.yaw = atan2f(yaw_y, yaw_x) * kRadiansToDegrees;
+        out.roll = NormalizeDegrees(
+            -out.yaw - 2.0f * atan2f(q.x, q.w) * kRadiansToDegrees);
+    } else if (singularity_test > kSingularityThreshold) {
+        out.pitch = 90.0f;
+        out.yaw = atan2f(yaw_y, yaw_x) * kRadiansToDegrees;
+        out.roll = NormalizeDegrees(
+            out.yaw - 2.0f * atan2f(q.x, q.w) * kRadiansToDegrees);
+    } else {
+        out.pitch = asinf(2.0f * singularity_test) * kRadiansToDegrees;
+        out.yaw = atan2f(yaw_y, yaw_x) * kRadiansToDegrees;
+        out.roll = atan2f(
+            -2.0f * (q.w * q.x + q.y * q.z),
+            1.0f - 2.0f * (q.x * q.x + q.y * q.y)) * kRadiansToDegrees;
+    }
+    return out;
+}
+
+bool ApplyBridgeHeadRotationToStereoView(const ac7vr::BridgeHeadPose& pose,
+                                         FakeRotator& rotation) {
+    if (!pose.orientation_valid) return false;
+    const FakeQuat head_q{
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+    const FakeRotator head = QuaternionToUnrealRotator(head_q);
+    rotation.pitch = NormalizeDegrees(rotation.pitch + head.pitch);
+    rotation.yaw = NormalizeDegrees(rotation.yaw + head.yaw);
+    rotation.roll = NormalizeDegrees(rotation.roll + head.roll);
+    return true;
+}
 
 void FakeStereoAdjustViewRect(FakeInterface*, std::int32_t pass, std::int32_t& x,
                               std::int32_t& y, std::uint32_t& width, std::uint32_t& height) {
@@ -410,9 +566,11 @@ FakeVector2* FakeStereoGetTextSafeRegion(FakeInterface*, FakeVector2* out) {
     return out;
 }
 
-void FakeStereoCalculateViewOffset(FakeInterface*, std::int32_t pass, FakeRotator& rotation,
-                                    float world_to_meters, FakeVector3& location) {
-    RecordSlot(FakeInterfaceKind::Stereo, 5, false);
+void ApplyFakeStereoViewOffset(std::int32_t pass, const FakeRotator& rotation,
+                               float world_to_meters, FakeVector3& location) {
+    if (std::isfinite(world_to_meters) && world_to_meters > 0.0f) {
+        g_fake_world_to_meters.store(world_to_meters, std::memory_order_relaxed);
+    }
     if (pass != 1 && pass != 2) return;
     constexpr float degrees_to_radians = 0.017453292519943295f;
     const float pitch = rotation.pitch * degrees_to_radians;
@@ -428,21 +586,103 @@ void FakeStereoCalculateViewOffset(FakeInterface*, std::int32_t pass, FakeRotato
     location.z += offset * (-sr * cp);
 }
 
-FakeMatrix* FakeStereoGetProjection(FakeInterface*, std::int32_t pass, FakeMatrix* out) {
-    const bool first = RecordSlot(FakeInterfaceKind::Stereo, 6, false);
+void FakeStereoCalculateViewOffset(FakeInterface*, std::int32_t pass, FakeRotator& rotation,
+                                    float world_to_meters, FakeVector3& location) {
+    RecordSlot(FakeInterfaceKind::Stereo, 5, false);
+    const auto call_count =
+        g_stereo_view_call_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call_count == 1 || (call_count % 300u) == 0) {
+        ac7vr::BridgeHeadPose pose{};
+        const bool bridge_pose_available = ac7vr::TryGetLatestOpenXrHeadPose(pose);
+        char line[768]{};
+        const int length = _snprintf_s(
+            line, sizeof(line), _TRUNCATE,
+            "stereo_view_input call=%u pass=%d rot=(%.6f,%.6f,%.6f) "
+            "loc=(%.6f,%.6f,%.6f) world_to_meters=%.6f bridge_pose_available=%u "
+            "raw_valid_o=%u raw_valid_p=%u raw_q=(%.6f,%.6f,%.6f,%.6f) "
+            "raw_p_m=(%.6f,%.6f,%.6f)\r\n",
+            static_cast<unsigned>(call_count), pass,
+            rotation.pitch, rotation.yaw, rotation.roll,
+            location.x, location.y, location.z, world_to_meters,
+            static_cast<unsigned>(bridge_pose_available),
+            static_cast<unsigned>(pose.orientation_valid),
+            static_cast<unsigned>(pose.position_valid),
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+            pose.position_meters.x, pose.position_meters.y, pose.position_meters.z);
+        if (length > 0) {
+            AppendImmediateDiagnostic(line, static_cast<DWORD>(length), false);
+        }
+    }
+    if (pass == 1 || pass == 2) {
+        ac7vr::BridgeHeadPose pose{};
+        if (ac7vr::TryGetLatestOpenXrHeadPose(pose)) {
+            ApplyBridgeHeadRotationToStereoView(pose, rotation);
+        }
+    }
+    ApplyFakeStereoViewOffset(pass, rotation, world_to_meters, location);
+}
+
+void FakeStereoCalculateSecondaryViewOffset(FakeInterface*, std::int32_t pass,
+                                             FakeRotator& rotation, float world_to_meters,
+                                             FakeVector3& location) {
+    RecordSlot(FakeInterfaceKind::Stereo, 6, false);
+    ApplyFakeStereoViewOffset(pass, rotation, world_to_meters, location);
+}
+
+bool BuildOpenXrStereoProjection(const ac7vr::BridgeEyeFov& fov, FakeMatrix& out) {
+    constexpr float half_pi = 1.5707963267948966f;
+    for (float angle : {fov.left, fov.right, fov.up, fov.down}) {
+        if (!std::isfinite(angle) || angle <= -half_pi || angle >= half_pi) return false;
+    }
+    const float left = tanf(fov.left), right = tanf(fov.right);
+    const float up = tanf(fov.up), down = tanf(fov.down);
+    const float width = right - left, height = up - down;
+    if (width <= 0.000001f || height <= 0.000001f) return false;
+
+    // AC7 copies this FMatrix directly at RVA 0x0183CA62. Its UE view
+    // transform uses row vectors and +Z forward in projection space:
+    // x_ndc = x/z * m00 + m20. Each signed FOV edge must map to +/-1.
+    // Adapt Khronos' -Z-forward projection by negating the third row's
+    // offsets; retain the existing UE infinite reversed-Z depth terms.
+    out = {};
+    out.m[0][0] = 2.0f / width;
+    out.m[1][1] = 2.0f / height;
+    out.m[2][0] = -(right + left) / width;
+    out.m[2][1] = -(up + down) / height;
+    out.m[2][3] = 1.0f;
+    out.m[3][2] = 10.0f;
+    return true;
+}
+
+FakeMatrix* FakeStereoGetStandardProjection(FakeInterface*, FakeMatrix* out, std::int32_t pass) {
+    const bool first = RecordSlot(FakeInterfaceKind::Stereo, 7, false);
     if (out) {
         *out = {};
-        // UE4 row-vector convention, 90-degree horizontal FOV, infinite
-        // reversed-Z perspective, and a 10 world-unit near plane.
         out->m[0][0] = 1.0f;
         out->m[1][1] = g_fake_eye_aspect.load(std::memory_order_relaxed);
         out->m[2][3] = 1.0f;
         out->m[3][2] = 10.0f;
+        ac7vr::BridgeEyeFov fov{};
+        if ((pass == 1 || pass == 2) &&
+            ac7vr::TryGetLatestOpenXrEyeFov(static_cast<std::uint32_t>(pass - 1), fov) &&
+            BuildOpenXrStereoProjection(fov, *out)) {
+            static std::atomic<unsigned> logged_eyes{0};
+            const unsigned bit = 1u << (pass - 1);
+            if (!(logged_eyes.fetch_or(bit, std::memory_order_relaxed) & bit)) {
+                char line[384]{};
+                const int length = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "stereo_openxr_projection pass=%d fov=(%.6f,%.6f,%.6f,%.6f) "
+                    "scale=(%.6f,%.6f) offset=(%.6f,%.6f) near=%.6f\r\n",
+                    pass, fov.left, fov.right, fov.up, fov.down,
+                    out->m[0][0], out->m[1][1], out->m[2][0], out->m[2][1], out->m[3][2]);
+                if (length > 0) AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
+            }
+        }
     }
     if (first) {
         char line[192]{};
         const int length = _snprintf_s(line, sizeof(line), _TRUNCATE,
-            "stereo_projection pass=%d aspect=%.6f output=%p\r\n", pass,
+            "stereo_standard_projection pass=%d aspect=%.6f output=%p\r\n", pass,
             g_fake_eye_aspect.load(std::memory_order_relaxed), out);
         if (length > 0) AppendImmediateDiagnostic(line, static_cast<DWORD>(length));
     }
@@ -450,21 +690,21 @@ FakeMatrix* FakeStereoGetProjection(FakeInterface*, std::int32_t pass, FakeMatri
 }
 
 void FakeStereoInitCanvas(FakeInterface*, void*, void*) {
-    RecordSlot(FakeInterfaceKind::Stereo, 7, false);
+    RecordSlot(FakeInterfaceKind::Stereo, 8, false);
 }
 
 bool FakeStereoIsSpectatorScreenActive(FakeInterface*) {
-    RecordSlot(FakeInterfaceKind::Stereo, 8, false);
+    RecordSlot(FakeInterfaceKind::Stereo, 9, false);
     return false;
 }
 
 void FakeStereoRenderTexture(FakeInterface*, void*, void*, void*) {
-    RecordSlot(FakeInterfaceKind::Stereo, 9, false);
+    RecordSlot(FakeInterfaceKind::Stereo, 10, false);
 }
 
 void FakeStereoGetOrthoProjection(FakeInterface*, std::int32_t width, std::int32_t,
                                    float, FakeMatrix* matrices) {
-    RecordSlot(FakeInterfaceKind::Stereo, 10, false);
+    RecordSlot(FakeInterfaceKind::Stereo, 11, false);
     if (!matrices) return;
     matrices[0] = {};
     for (std::size_t i = 0; i < 4; ++i) matrices[0].m[i][i] = 1.0f;
@@ -473,17 +713,17 @@ void FakeStereoGetOrthoProjection(FakeInterface*, std::int32_t width, std::int32
 }
 
 void* FakeStereoGetCustomPresent(FakeInterface*) {
-    RecordSlot(FakeInterfaceKind::Stereo, 11, false);
-    return nullptr;
-}
-
-void* FakeStereoGetRenderTargetManager(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Stereo, 12, false);
     return nullptr;
 }
 
-void* FakeStereoGetLayers(FakeInterface*) {
+void* FakeStereoGetRenderTargetManager(FakeInterface*) {
     RecordSlot(FakeInterfaceKind::Stereo, 13, false);
+    return nullptr;
+}
+
+void* FakeStereoGetLayers(FakeInterface*) {
+    RecordSlot(FakeInterfaceKind::Stereo, 14, false);
     return nullptr;
 }
 
@@ -494,6 +734,8 @@ void InitializeFakeInterfaces() {
 
     g_fake_hmd_vtable[0] = reinterpret_cast<void*>(&FakeHmdGetDeviceName);
     g_fake_hmd_vtable[22] = reinterpret_cast<void*>(&FakeXrGetCamera);
+    g_fake_hmd_vtable[9] = reinterpret_cast<void*>(&FakeXrGetCurrentPose);
+    g_fake_hmd_vtable[14] = reinterpret_cast<void*>(&FakeXrGetAudioListenerOffset);
     g_fake_hmd_vtable[0xB8 / sizeof(void*)] = reinterpret_cast<void*>(&FakeHmdGetDevice);
     g_fake_hmd_vtable[24] = reinterpret_cast<void*>(&FakeXrGetStereoRenderingDevice);
     g_fake_hmd_vtable[25] = reinterpret_cast<void*>(&FakeXrGetInput);
@@ -511,7 +753,9 @@ void InitializeFakeInterfaces() {
     g_fake_device_vtable[33] = reinterpret_cast<void*>(&FakeDeviceDrawDistortionMesh);
     g_fake_device_vtable[35] = reinterpret_cast<void*>(&FakeDeviceUpdatePostProcessSettings);
     g_fake_device_vtable[36] = reinterpret_cast<void*>(&FakeDeviceGetDistortionTextureLeft);
-    g_fake_device_vtable[40] = reinterpret_cast<void*>(&FakeDeviceGetTextureScaleLeft);
+    g_fake_device_vtable[37] = reinterpret_cast<void*>(&FakeDeviceSlot37ContextHook);
+    g_fake_device_vtable[40] = reinterpret_cast<void*>(&FakeDeviceSlot40ObjectHook);
+    g_fake_device_vtable[41] = reinterpret_cast<void*>(&FakeDeviceSlot41BufferHook);
     g_fake_device_vtable[52] = reinterpret_cast<void*>(&FakeDeviceStartupHook);
     g_fake_stereo_vtable[0] = reinterpret_cast<void*>(&FakeStereoIsEnabled);
     g_fake_stereo_vtable[1] = reinterpret_cast<void*>(&FakeStereoIsEnabledOnNextFrame);
@@ -519,23 +763,28 @@ void InitializeFakeInterfaces() {
     g_fake_stereo_vtable[3] = reinterpret_cast<void*>(&FakeStereoAdjustViewRect);
     g_fake_stereo_vtable[4] = reinterpret_cast<void*>(&FakeStereoGetTextSafeRegion);
     g_fake_stereo_vtable[5] = reinterpret_cast<void*>(&FakeStereoCalculateViewOffset);
-    g_fake_stereo_vtable[6] = reinterpret_cast<void*>(&FakeStereoGetProjection);
-    g_fake_stereo_vtable[7] = reinterpret_cast<void*>(&FakeStereoInitCanvas);
-    g_fake_stereo_vtable[8] = reinterpret_cast<void*>(&FakeStereoIsSpectatorScreenActive);
-    g_fake_stereo_vtable[9] = reinterpret_cast<void*>(&FakeStereoRenderTexture);
-    g_fake_stereo_vtable[10] = reinterpret_cast<void*>(&FakeStereoGetOrthoProjection);
-    g_fake_stereo_vtable[11] = reinterpret_cast<void*>(&FakeStereoGetCustomPresent);
-    g_fake_stereo_vtable[12] = reinterpret_cast<void*>(&FakeStereoGetRenderTargetManager);
-    g_fake_stereo_vtable[13] = reinterpret_cast<void*>(&FakeStereoGetLayers);
+    g_fake_stereo_vtable[6] = reinterpret_cast<void*>(&FakeStereoCalculateSecondaryViewOffset);
+    g_fake_stereo_vtable[7] = reinterpret_cast<void*>(&FakeStereoGetStandardProjection);
+    g_fake_stereo_vtable[8] = reinterpret_cast<void*>(&FakeStereoInitCanvas);
+    g_fake_stereo_vtable[9] = reinterpret_cast<void*>(&FakeStereoIsSpectatorScreenActive);
+    g_fake_stereo_vtable[10] = reinterpret_cast<void*>(&FakeStereoRenderTexture);
+    g_fake_stereo_vtable[11] = reinterpret_cast<void*>(&FakeStereoGetOrthoProjection);
+    g_fake_stereo_vtable[12] = reinterpret_cast<void*>(&FakeStereoGetCustomPresent);
+    g_fake_stereo_vtable[13] = reinterpret_cast<void*>(&FakeStereoGetRenderTargetManager);
+    g_fake_stereo_vtable[14] = reinterpret_cast<void*>(&FakeStereoGetLayers);
     g_fake_hmd_enabled = false;
     g_fake_stereo_enabled = false;
     g_fake_eye_aspect = 1.0f;
+    g_fake_world_to_meters = 0.0f;
+    g_pose_call_count = 0;
+    g_stereo_view_call_count = 0;
+    g_pose_first_valid_logged = false;
 
     for (auto& hit : g_hmd_slot_hits) hit.store(0, std::memory_order_relaxed);
     for (auto& hit : g_device_slot_hits) hit.store(0, std::memory_order_relaxed);
     for (auto& hit : g_stereo_slot_hits) hit.store(0, std::memory_order_relaxed);
-    g_last_interface.store(0, std::memory_order_relaxed);
-    g_last_slot.store(0, std::memory_order_relaxed);
+    g_last_interface = 0;
+    g_last_slot = 0;
 }
 
 LONG CALLBACK ProbeVectoredExceptionHandler(EXCEPTION_POINTERS* info) {
@@ -550,8 +799,8 @@ LONG CALLBACK ProbeVectoredExceptionHandler(EXCEPTION_POINTERS* info) {
 
     const auto* context = info->ContextRecord;
     char line[1024]{};
-    const auto kind = static_cast<FakeInterfaceKind>(g_last_interface.load(std::memory_order_relaxed));
-    const auto slot = g_last_slot.load(std::memory_order_relaxed);
+    const auto kind = static_cast<FakeInterfaceKind>(g_last_interface);
+    const auto slot = g_last_slot;
     const auto access_kind = info->ExceptionRecord->NumberParameters >= 1
         ? info->ExceptionRecord->ExceptionInformation[0]
         : 0;
@@ -984,6 +1233,7 @@ DWORD WINAPI ProbeThread(void*) {
         std::array<std::uint32_t, kFakeVtableSlots> previous_device_hits{};
         std::array<std::uint32_t, kFakeVtableSlots> previous_stereo_hits{};
         const ULONGLONG start = GetTickCount64();
+        ULONGLONG last_slot_summary = start;
         bool detailed_dump_done = false;
         bool ownership_lost = false;
         bool stereo_probe_checked = false;
@@ -994,9 +1244,13 @@ DWORD WINAPI ProbeThread(void*) {
             }
 
             bool changed = false;
-            changed |= LogSlotChanges(file, L"hmd", g_hmd_slot_hits, previous_hmd_hits);
-            changed |= LogSlotChanges(file, L"device", g_device_slot_hits, previous_device_hits);
-            changed |= LogSlotChanges(file, L"stereo", g_stereo_slot_hits, previous_stereo_hits);
+            const ULONGLONG tick = GetTickCount64();
+            if (tick - last_slot_summary >= 1000) {
+                changed |= LogSlotChanges(file, L"hmd", g_hmd_slot_hits, previous_hmd_hits);
+                changed |= LogSlotChanges(file, L"device", g_device_slot_hits, previous_device_hits);
+                changed |= LogSlotChanges(file, L"stereo", g_stereo_slot_hits, previous_stereo_hits);
+                last_slot_summary = tick;
+            }
 
             if (state.installed &&
                 (*state.hmd_slot != &g_fake_hmd || *state.stereo_slot != &g_fake_stereo)) {
@@ -1005,6 +1259,9 @@ DWORD WINAPI ProbeThread(void*) {
                          *state.hmd_slot, *state.stereo_slot);
                 state.installed = false;
                 ownership_lost = true;
+                LogSlotChanges(file, L"hmd", g_hmd_slot_hits, previous_hmd_hits);
+                LogSlotChanges(file, L"device", g_device_slot_hits, previous_device_hits);
+                LogSlotChanges(file, L"stereo", g_stereo_slot_hits, previous_stereo_hits);
                 changed = true;
             }
 
@@ -1012,8 +1269,14 @@ DWORD WINAPI ProbeThread(void*) {
                 for (const auto& [label, rva] : kProbeRvas) {
                     LogBytes(file, label, module + rva, 160);
                 }
-                DumpRuntimeRegion(file, module);
-                DumpRuntimeImageSections(file, module);
+                const bool runtime_capture_requested = GetFileAttributesW(
+                    L"E:\\trigger_ac7vr\\enable_runtime_capture.flag") != INVALID_FILE_ATTRIBUTES;
+                if (runtime_capture_requested) {
+                    DumpRuntimeRegion(file, module);
+                    DumpRuntimeImageSections(file, module);
+                } else {
+                    fwprintf(file, L"runtime_image_dump skipped=1 reason=capture_flag_missing\n");
+                }
                 LogGeneralProjectSettings(file, module);
                 LogHmdState(file, module);
                 fwprintf(file, L"persistent_fake_hmd snapshot installed=%u hmd_enabled=%u stereo_enabled=%u\n",
@@ -1100,6 +1363,7 @@ extern "C" DWORD WINAPI XInputSetState(DWORD user_index, XINPUT_VIBRATION* vibra
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
+        ac7vr::InstallGraphicsBridgeHooks();
         if (HANDLE thread = CreateThread(nullptr, 0, ProbeThread, nullptr, 0, nullptr)) {
             CloseHandle(thread);
         }
