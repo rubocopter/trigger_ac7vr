@@ -2,6 +2,8 @@
 
 Actualizado: 2026-10-03. Repositorio de trabajo: `E:\trigger_ac7vr`.
 
+Publicación: repositorio privado [rubocopter/trigger_ac7vr](https://github.com/rubocopter/trigger_ac7vr). Tras verificar las páginas de UEVR Compatibility Mod y Pre-Campaign se revisó la justificación del desarrollo independiente: ya existe una ruta documentada para acceder al modo/misiones VR originales en PC mediante mods y UEVR. No se ha probado localmente. Ver [project-scope.md](project-scope.md) para fuentes, límites y recomendación actual antes de invertir en otra iteración del backend.
+
 La carpeta antigua `C:\Users\onita\Documents\ChatGPT\Ace Combat` todavía existe: la revisión automática rechazó su eliminación con «blocked by policy». Sus dos scripts coinciden por SHA-256 con los del repositorio. Se preservaron también sus referencias internas de Git en `evidence\legacy_workspace_20261003`, verificando los 29 archivos de la copia. La eliminación queda pendiente; todo el desarrollo y la compilación de esta iteración se hicieron en E:.
 
 ## Qué estaba a medias

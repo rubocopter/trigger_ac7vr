@@ -10,6 +10,8 @@ Both this prototype and UEVR can use Unreal's real stereo renderer. This project
 
 The additional research objective is to determine whether retained Project Aces VR logic can be reused on PC. Finding VR symbols and code does **not** demonstrate that original PSVR missions, assets, menus, or gameplay are available or recoverable. None of those original missions has been restored by this project.
 
+Existing work materially changes that research objective: [Kosnag's UEVR Compatibility Mod](https://www.nexusmods.com/acecombat7skiesunknown/mods/2387) adapts VR cockpit/gameplay features, and [kokeo1's Pre-Campaign Mod](https://www.nexusmods.com/acecombat7skiesunknown/mods/3223) documents making the original VR mode playable on PC, including an UEVR variant requiring the compatibility mod. These author descriptions have been verified, but that combination has not been tested locally. Recovering original missions is therefore not a demonstrated unique opportunity for this project. For the goal of playing AC7 in VR, evaluating the existing combination should precede further standalone backend development.
+
 The next decision gate is a comparison with UEVR under the same scene, settings, headset and runtime, alongside investigating a concrete game-specific VR feature. Continuing an independent implementation should be justified by a measured benefit or demonstrated additional functionality. Otherwise, adapting UEVR is a reasonable direction. See [the project scope and decision criteria](docs/project-scope.md).
 
 ## Current status (2026-10-03)

@@ -8,6 +8,17 @@ UEVR es un adaptador VR para muchos juegos Unreal. Este proyecto está construye
 
 Si el único objetivo es jugar AC7 en VR y UEVR ya lo hace satisfactoriamente, este proyecto todavía no ha acreditado una ventaja que justifique reemplazarlo.
 
+## Revisión tras comprobar los mods existentes
+
+Se verificaron las páginas de sus autores el 2026-10-03:
+
+- [UEVR Compatibility Mod, de kosnag](https://www.nexusmods.com/acecombat7skiesunknown/mods/2387): adaptación de funciones VR de AC7 para UEVR/UE4SS, cabinas, instrumentos, HUD y ajustes de gameplay. Su descripción busca aproximarse a la experiencia PSVR; no debe confundirse por sí sola con el mod de misiones.
+- [PRE-CAMPAIGN MOD, de kokeo1](https://www.nexusmods.com/acecombat7skiesunknown/mods/3223): el autor documenta hacer jugable el modo VR sustituyendo la entrada de multijugador o créditos, en pantalla plana o mediante UEVR. La versión UEVR declara como requisito el mod de kosnag. El autor reconoce el trabajo previo que permitió hacer funcionar las misiones VR en PC.
+
+No se ha instalado ni probado esa combinación localmente. Su existencia está verificada; el rendimiento, la estabilidad y la compatibilidad concreta con este PSVR2 aún no. Los fallos conocidos que documentan sus autores tampoco constituyen una ventaja demostrada de nuestro prototipo.
+
+Conclusión revisada: la recuperación de las misiones originales no es una oportunidad exclusiva acreditada para este proyecto. Para el objetivo práctico de jugar, la prioridad recomendada es evaluar la ruta UEVR + mods existentes. La implementación independiente solo justificaría más inversión ante una limitación concreta que pudiera resolverse con una mejora medida. Los resultados de ingeniería inversa obtenidos se conservan, sin presentarlos como una necesidad para jugar esas misiones.
+
 ## Demostrado hasta ahora
 
 - El prototipo compila y supera las dos suites de regresión offline.
