@@ -2,6 +2,8 @@
 
 Experimental, AC7-specific VR integration for **ACE COMBAT 7: Skies Unknown** on Windows.
 
+**Project paused by the owner on 2026-10-03.** No further development or headset tests are requested. The [project assessment](docs/project-scope.md) records the existing community mods, the lack of a demonstrated advantage over UEVR, and the criteria for any future resumption. The latest pose/FOV submission correction is preserved as an unvalidated experimental checkpoint.
+
 This is a working experimental prototype, not a finished VR mod. A PSVR2/SteamVR user has confirmed binocular fusion, visible head rotation, apparent positional tracking, and a short gameplay session. Performance remains irregular, and complete missions, UI behavior, and broad compatibility have not been validated.
 
 ## What this project does and does not demonstrate

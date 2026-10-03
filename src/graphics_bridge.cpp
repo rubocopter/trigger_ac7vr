@@ -420,6 +420,9 @@ struct OpenXrContext {
     std::uint32_t source_width = 0;
     std::uint32_t source_height = 0;
     std::uint64_t submitted_frames = 0;
+    std::array<XrPosef, 2> rendered_eye_poses{};
+    std::array<XrFovf, 2> rendered_eye_fovs{};
+    bool rendered_views_valid = false;
     ULONGLONG next_init_attempt = 0;
     bool logged_source = false;
 };
@@ -999,12 +1002,38 @@ void SubmitOpenXrFrame(IDXGISwapChain* swapchain, FrameTimings& timing) {
     result = g_xr.locate_views(g_xr.session, &locate_info, &view_state,
                                static_cast<std::uint32_t>(views.size()), &view_count, views.data());
     const bool located = XR_SUCCEEDED(result) && view_count >= 2;
+    std::array<XrPosef, 2> submitted_eye_poses{};
+    std::array<XrFovf, 2> submitted_eye_fovs{};
+    bool submitted_views_match_render = false;
     if (!located) {
         Log("openxr locate_views_failed xr=%d count=%u flags=0x%llX\r\n",
             static_cast<int>(result), view_count,
             static_cast<unsigned long long>(view_state.viewStateFlags));
     }
-    if (located) PublishPose(views.data(), view_count, view_state.viewStateFlags);
+    if (located) {
+        // AC7 consumes the pose/FOV published by the previous Present while it
+        // renders the next game frame. Submit that same pose with the image we
+        // just received so the compositor's layer metadata matches the camera
+        // that actually produced the pixels. The newly located views are then
+        // published for AC7's following frame.
+        if (g_xr.rendered_views_valid) {
+            submitted_eye_poses = g_xr.rendered_eye_poses;
+            submitted_eye_fovs = g_xr.rendered_eye_fovs;
+            submitted_views_match_render = true;
+        } else {
+            for (std::size_t eye = 0; eye < submitted_eye_poses.size(); ++eye) {
+                submitted_eye_poses[eye] = views[eye].pose;
+                submitted_eye_fovs[eye] = views[eye].fov;
+            }
+        }
+
+        PublishPose(views.data(), view_count, view_state.viewStateFlags);
+        for (std::size_t eye = 0; eye < g_xr.rendered_eye_poses.size(); ++eye) {
+            g_xr.rendered_eye_poses[eye] = views[eye].pose;
+            g_xr.rendered_eye_fovs[eye] = views[eye].fov;
+        }
+        g_xr.rendered_views_valid = true;
+    }
 
     bool copied = false;
     bool reset_required = false;
@@ -1031,8 +1060,8 @@ void SubmitOpenXrFrame(IDXGISwapChain* swapchain, FrameTimings& timing) {
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     if (copied) {
         for (int eye = 0; eye < 2; ++eye) {
-            projection_views[eye].pose = views[eye].pose;
-            projection_views[eye].fov = views[eye].fov;
+            projection_views[eye].pose = submitted_eye_poses[eye];
+            projection_views[eye].fov = submitted_eye_fovs[eye];
             projection_views[eye].subImage.swapchain = g_xr.eyes[eye].handle;
             projection_views[eye].subImage.imageRect.extent = {g_xr.eyes[eye].width, g_xr.eyes[eye].height};
             projection_views[eye].subImage.imageArrayIndex = 0;
@@ -1056,9 +1085,10 @@ void SubmitOpenXrFrame(IDXGISwapChain* swapchain, FrameTimings& timing) {
     if (XR_SUCCEEDED(result) && copied) {
         ++g_xr.submitted_frames;
         if (g_xr.submitted_frames == 1 || (g_xr.submitted_frames % 900) == 0) {
-            Log("openxr submitted_frames=%llu pose_flags=0x%llX\r\n",
+            Log("openxr submitted_frames=%llu pose_flags=0x%llX pose_matches_render=%u\r\n",
                 static_cast<unsigned long long>(g_xr.submitted_frames),
-                static_cast<unsigned long long>(view_state.viewStateFlags));
+                static_cast<unsigned long long>(view_state.viewStateFlags),
+                static_cast<unsigned>(submitted_views_match_render));
         }
     } else if (XR_FAILED(result)) {
         Log("openxr end_frame_failed xr=%d\r\n", static_cast<int>(result));

@@ -2,6 +2,14 @@
 
 Actualizado: 2026-10-03. Repositorio de trabajo: `E:\trigger_ac7vr`.
 
+## Estado al pausar el proyecto
+
+El usuario ha decidido no tocar el proyecto de momento y ha solicitado documentar y publicar la evaluación. El desarrollo y las solicitudes de prueba quedan en pausa. Las pruebas pendientes descritas más abajo son contexto histórico para una eventual reanudación.
+
+La evaluación de los cuatro mods enlazados por el usuario, Pre-Campaign y la distinción entre backend VR y recuperación de contenido se conserva en [project-scope.md](project-scope.md). No existe una ventaja medida frente a UEVR ni contenido original exclusivo recuperado por este prototipo. La recomendación para retomar es evaluar primero la alternativa existente y exigir una mejora concreta antes de invertir más en el backend propio.
+
+Se conserva en este checkpoint la corrección de metadata pose/FOV: fue compilada y desplegada, pero sigue sin validación física. La DLL de esa iteración tiene SHA-256 `C8744A2C7BF1F553D3747BAC78DCF04ECAC2E274302FC14BF31DC906A7AF3471`; la evidencia y el respaldo anterior están en `evidence\pose_submission_alignment_20261003_020624`. Publicar el código no acredita mejora de estabilidad, latencia o rendimiento en el visor. No se realizan nuevos cambios de sincronización.
+
 Publicación: repositorio privado [rubocopter/trigger_ac7vr](https://github.com/rubocopter/trigger_ac7vr). Tras verificar las páginas de UEVR Compatibility Mod y Pre-Campaign se revisó la justificación del desarrollo independiente: ya existe una ruta documentada para acceder al modo/misiones VR originales en PC mediante mods y UEVR. No se ha probado localmente. Ver [project-scope.md](project-scope.md) para fuentes, límites y recomendación actual antes de invertir en otra iteración del backend.
 
 La carpeta antigua `C:\Users\onita\Documents\ChatGPT\Ace Combat` todavía existe: la revisión automática rechazó su eliminación con «blocked by policy». Sus dos scripts coinciden por SHA-256 con los del repositorio. Se preservaron también sus referencias internas de Git en `evidence\legacy_workspace_20261003`, verificando los 29 archivos de la copia. La eliminación queda pendiente; todo el desarrollo y la compilación de esta iteración se hicieron en E:.
@@ -76,7 +84,15 @@ Prueba pendiente: con los mismos ajustes gráficos, repetir durante aproximadame
 
 El usuario informó «algo mejor». La sesión del probe iniciada a las 01:36:50 contiene cero excepciones y cero slots desconocidos. El log gráfico incluye 83 ventanas completas de 120 muestras (9.960 muestras): media ponderada de intervalo de 12,593 ms, equivalente a 79,41 presentaciones/s; 33 ventanas están por debajo de 80 Hz. El tramo final ronda 90 Hz, por lo que no representa toda la sesión. No hay marcadores de escena que permitan asignar cada ventana a menú o misión.
 
-En las ventanas lentas, `xrWaitFrame` y Present del monitor consumen poco; `xrEndFrame` llega a aproximadamente 9–11 ms de media. El SyncInterval capturado es 0 en todas las ventanas. Esto no aporta evidencia a favor de una segunda espera por VSync del monitor como causa dominante. `copy_cpu` ronda 0,014 ms, pero sigue sin medir ejecución GPU. Se debe investigar el coste de envío/compositor y la carga GPU antes de cambiar arbitrariamente la sincronización. El máximo aislado de intervalo fue de 495,814 ms, sin contexto de escena suficiente para atribuirlo. No se ha instalado otra DLL tras esta prueba.
+En las ventanas lentas, `xrWaitFrame` cae a aproximadamente 0,02 ms mientras `xrEndFrame` llega a aproximadamente 9–11 ms de media. En los tramos sanos de ~90 Hz ocurre lo contrario: `xrWaitFrame` absorbe unos 6–7 ms y `xrEndFrame` ronda 0,3 ms. El propio runtime también llega a anunciar `predictedDisplayPeriod=22,222 ms` en algunas ventanas. Según la especificación de [xrWaitFrame](https://registry.khronos.org/OpenXR/specs/1.1/man/html/xrWaitFrame.html), el runtime puede cambiar el throttling según el historial de envío/completado. Por tanto, el tiempo observado dentro de `xrEndFrame` no debe interpretarse como coste computacional propio de esa función: es compatible con backpressure o frames que llegan tarde.
+
+El SyncInterval capturado es 0 en todas las ventanas, así que no hay evidencia de una segunda espera por VSync del monitor como causa dominante. `copy_cpu` ronda 0,014 ms, pero solo mide adquisición/espera y envío de órdenes, no ejecución GPU. El máximo aislado de intervalo fue de 495,814 ms, sin contexto de escena suficiente para atribuirlo.
+
+La auditoría del orden de poses encontró además un desfase real de un frame en la metadata de composición. AC7 renderiza usando la pose/FOV publicada por el `Present` anterior; sin embargo, el bridge localizaba una pose nueva al entrar en el `Present` actual y etiquetaba con ella la imagen ya renderizada. La nueva iteración conserva por ojo la pose/FOV que AC7 recibió para ese frame y usa esos mismos valores al construir `XrCompositionLayerProjectionView`; la pose recién localizada queda publicada para el frame siguiente. Esto alinea los píxeles enviados con la pose que realmente los generó y deja al compositor hacer su reproyección a partir de metadata coherente.
+
+La captura también muestra una diferencia importante de resolución: SteamVR recomienda `2804x2860` por ojo para este PSVR2, mientras el prototipo recibe un backbuffer SBS de `2560x1440` y envía `1280x1440` por ojo. El prototipo está renderizando aproximadamente el 23 % de los píxeles recomendados por ojo. Cualquier comparación con UEVR debe normalizar resolución/escala; comparar sus valores por defecto no sería una medida justa de eficiencia.
+
+La iteración de alineación de pose compila y pasa las dos suites offline y el forwarding XInput. Todavía no tiene validación física. La siguiente prueba debe responder únicamente si mantiene la fusión/tracking y si cambia la sensación de estabilidad/latencia o el pacing en el mismo escenario de juego. No se justifica otra modificación de sincronización antes de ese resultado.
 
 ## Resultado de la prueba de fusión
 
